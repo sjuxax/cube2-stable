@@ -1069,6 +1069,12 @@ namespace game
                        *actor = getclient(acn);
                 if(!actor) break;
                 actor->frags = frags;
+                //we should be able to get teamkills from the server somewhere
+                //because the server tracks them. right now we will track them ourselves.
+
+                if (actor==player1 && isteam(actor->team, victim->team)) {  player1->teamkills++; }
+                else if (actor==player1 && !isteam(actor->team, victim->team)) { player1->kills++; }
+
                 if(actor!=player1 && (!cmode || !cmode->hidefrags()))
                 {
                     defformatstring(ds)("@%d", actor->frags);
