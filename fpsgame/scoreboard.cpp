@@ -324,10 +324,6 @@ namespace game
         g.textf("deaths: %d ", 0xFFFFDD, NULL, player1->deaths);
         g.textf("teamkills: %d", 0xFFFFDD, NULL, player1->teamkills);
         g.poplist();
-        if(m_ctf)
-        { 
-            g.textf("flags captured: %d", 0xFFFFDD, NULL, player1->flags);
-        }
     }
 
     struct scoreboardgui : g3d_callback
