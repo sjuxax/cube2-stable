@@ -54,9 +54,10 @@ void glmatrixf::adjoint(const glmatrixf &m)
 
 bool glmatrixf::invert(const glmatrixf &m, float mindet)
 {
-    float det = m.determinant();
-    if(fabs(det) < mindet) return false;
+    float a1 = m.v[0], b1 = m.v[4], c1 = m.v[8], d1 = m.v[12]; 
     adjoint(m);
+    float det = a1*v[0] + b1*v[1] + c1*v[2] + d1*v[3]; // float det = m.determinant(); 
+    if(fabs(det) < mindet) return false;
     float invdet = 1/det;
     loopi(16) v[i] *= invdet;
     return true;
@@ -118,14 +119,18 @@ bool linecylinderintersect(const vec &from, const vec &to, const vec &start, con
         else dist = 0;
         return true;
     }
-    float b = dd*mn - nd*md,
-          discrim = b*b - a*c;
-    if(discrim < 0) return false;
-    dist = (-b - sqrtf(discrim)) / a;
+    else if(c > 0)
+    {
+        float b = dd*mn - nd*md,
+              discrim = b*b - a*c;
+        if(discrim < 0) return false;
+        dist = (-b - sqrtf(discrim)) / a;
+    }
+    else dist = 0;
     float offset = md + dist*nd;
     if(offset < 0)
     {
-        if(nd < 0) return false;
+        if(nd <= 0) return false;
         dist = -md / nd;
         if(k + dist*(2*mn + dist*nn) > 0) return false;
     }

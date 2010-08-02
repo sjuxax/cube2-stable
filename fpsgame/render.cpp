@@ -8,8 +8,9 @@ namespace game
     VARP(ragdoll, 0, 1, 1);
     VARP(ragdollmillis, 0, 10000, 300000);
     VARP(ragdollfade, 0, 1000, 300000);
-    VARP(playermodel, 0, 0, 2);
+    VARFP(playermodel, 0, 0, 4, changedplayermodel());
     VARP(forceplayermodels, 0, 0, 1);
+    VARP(allplayermodels, 0, 0, 1);
 
     vector<fpsent *> ragdolls;
 
@@ -28,7 +29,7 @@ namespace game
 
     void clearragdolls()
     {
-        ragdolls.deletecontentsp();
+        ragdolls.deletecontents();
     }
 
     void moveragdolls()
@@ -45,18 +46,20 @@ namespace game
         }
     }
 
-    static const playermodelinfo playermodels[3] =
+    static const playermodelinfo playermodels[5] =
     {
         { "mrfixit", "mrfixit/blue", "mrfixit/red", "mrfixit/hudguns", NULL, "mrfixit/horns", { "mrfixit/armor/blue", "mrfixit/armor/green", "mrfixit/armor/yellow" }, "mrfixit", "mrfixit_blue", "mrfixit_red", true, true},
         { "snoutx10k", "snoutx10k/blue", "snoutx10k/red", "snoutx10k/hudguns", NULL, "snoutx10k/wings", { "snoutx10k/armor/blue", "snoutx10k/armor/green", "snoutx10k/armor/yellow" }, "snoutx10k", "snoutx10k_blue", "snoutx10k_red", true, true },
-        { "ogro/green", "ogro/blue", "ogro/red", "mrfixit/hudguns", "ogro/vwep", NULL, { NULL, NULL, NULL }, "ogro", "ogro_blue", "ogro_red", false, false }
+        { "ogro/green", "ogro/blue", "ogro/red", "mrfixit/hudguns", "ogro/vwep", NULL, { NULL, NULL, NULL }, "ogro", "ogro_blue", "ogro_red", false, false },
+        { "inky", "inky/blue", "inky/red", "inky/hudguns", NULL, "inky/quad", { "inky/armor/blue", "inky/armor/green", "inky/armor/yellow" }, "inky", "inky_blue", "inky_red", true, true },
+        { "captaincannon", "captaincannon/blue", "captaincannon/red", "captaincannon/hudguns", NULL, "captaincannon/quad", { "captaincannon/armor/blue", "captaincannon/armor/green", "captaincannon/armor/yellow" }, "captaincannon", "captaincannon_blue", "captaincannon_red", true, true }
     };
 
     int chooserandomplayermodel(int seed)
     {
         static int choices[sizeof(playermodels)/sizeof(playermodels[0])];
         int numchoices = 0;
-        loopi(sizeof(playermodels)/sizeof(playermodels[0])) if(i == playermodel || playermodels[i].selectable) choices[numchoices++] = i;
+        loopi(sizeof(playermodels)/sizeof(playermodels[0])) if(i == playermodel || playermodels[i].selectable || allplayermodels) choices[numchoices++] = i;
         if(numchoices <= 0) return -1;
         return choices[(seed&0xFFFF)%numchoices];
     }
@@ -70,8 +73,36 @@ namespace game
     const playermodelinfo &getplayermodelinfo(fpsent *d)
     {
         const playermodelinfo *mdl = getplayermodelinfo(d==player1 || forceplayermodels ? playermodel : d->playermodel);
-        if(!mdl || !mdl->selectable) mdl = getplayermodelinfo(playermodel);
+        if(!mdl || (!mdl->selectable && !allplayermodels)) mdl = getplayermodelinfo(playermodel);
         return *mdl;
+    }
+
+    void changedplayermodel()
+    {
+        if(player1->clientnum < 0) player1->playermodel = playermodel;
+        if(player1->ragdoll) cleanragdoll(player1);
+        loopv(ragdolls) 
+        {
+            fpsent *d = ragdolls[i];
+            if(!d->ragdoll) continue;
+            if(!forceplayermodels)
+            {
+                const playermodelinfo *mdl = getplayermodelinfo(d->playermodel);
+                if(mdl && (mdl->selectable || allplayermodels)) continue;
+            }
+            cleanragdoll(d);
+        }
+        loopv(players)
+        {
+            fpsent *d = players[i];
+            if(d == player1 || !d->ragdoll) continue;
+            if(!forceplayermodels)
+            {
+                const playermodelinfo *mdl = getplayermodelinfo(d->playermodel);
+                if(mdl && (mdl->selectable || allplayermodels)) continue;
+            }
+            cleanragdoll(d);
+        }
     }
 
     void preloadplayermodel()
@@ -80,7 +111,7 @@ namespace game
         {
             const playermodelinfo *mdl = getplayermodelinfo(i);
             if(!mdl) break;
-            if(i != playermodel && (!multiplayer(false) || forceplayermodels || !mdl->selectable)) continue;
+            if(i != playermodel && (!multiplayer(false) || forceplayermodels || (!mdl->selectable && !allplayermodels))) continue;
             if(m_teammode)
             {
                 preloadmodel(mdl->blueteam);
@@ -167,8 +198,8 @@ namespace game
 
         if(intermission)
         {
-            bestteams.setsize(0);
-            bestplayers.setsize(0);
+            bestteams.shrink(0);
+            bestplayers.shrink(0);
             if(m_teammode) getbestteams(bestteams);
             else getbestplayers(bestplayers);
         }
@@ -183,7 +214,7 @@ namespace game
             int team = 0;
             if(teamskins || m_teammode) team = isteam(player1->team, d->team) ? 1 : 2;
             renderplayer(d, getplayermodelinfo(d), team, 1, mainpass);
-            copystring(d->info, colorname(d, NULL, "@"));
+            copystring(d->info, colorname(d));
             if(d->maxhealth>100) { defformatstring(sn)(" +%d", d->maxhealth-100); concatstring(d->info, sn); }
             if(d->state!=CS_DEAD) particle_text(d->abovehead(), d->info, PART_TEXT, 1, team ? (team==1 ? 0x6496FF : 0xFF4B19) : 0x1EC850, 2.0f);
         }
@@ -248,7 +279,10 @@ namespace game
         }
     }
 
-    dynent guninterp;
+    struct hudent : dynent
+    {
+        hudent() { type = ENT_CAMERA; }
+    } guninterp;
 
     SVARP(hudgunsdir, "");
 

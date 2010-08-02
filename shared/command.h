@@ -77,10 +77,10 @@ struct ident
     { val.s = c; storage.s = s; }
     // ID_ALIAS
     ident(int t, const char *n, char *a, int flags)
-        : type(t), name(n), override(NO_OVERRIDE), stack(NULL), action(a), flags(flags) {}
+        : type(t), name(n), override(NO_OVERRIDE), stack(NULL), action(a), isexecuting(NULL), flags(flags) {}
     // ID_COMMAND, ID_CCOMMAND
     ident(int t, const char *n, const char *narg, void *f = NULL, void *s = NULL, int flags = 0)
-        : type(t), name(n), fun((void (__cdecl *)(void))f), narg(narg), self(s), flags(flags) {}
+        : type(t), name(n), override(NO_OVERRIDE), fun((void (__cdecl *)(void))f), narg(narg), self(s), flags(flags) {}
 
     virtual ~ident() {}        
 
@@ -90,10 +90,24 @@ struct ident
 };
 
 extern void addident(const char *name, ident *id);
+extern const char *intstr(int v);
 extern void intret(int v);
 extern const char *floatstr(float v);
 extern void floatret(float v);
 extern void result(const char *s);
+
+static inline int parseint(const char *s)
+{
+    return int(strtol(s, NULL, 0));
+}
+
+static inline float parsefloat(const char *s)
+{
+    // not all platforms (windows) can parse hexadecimal integers via strtod
+    char *end;
+    double val = strtod(s, &end);
+    return val || end==s || (*end!='x' && *end!='X') ? float(val) : float(parseint(s));
+}
 
 // nasty macros for registering script functions, abuses globals to avoid excessive infrastructure
 #define COMMANDN(name, fun, nargs) static bool __dummy_##fun = addcommand(#name, (void (*)())fun, nargs)
@@ -164,10 +178,12 @@ extern void result(const char *s);
 #define CCOMMAND(n, g, proto, b) _CCOMMAND(ID_CCOMMAND, (this), n, g, proto, b)
 
 // anonymous inline commands, uses nasty template trick with line numbers to keep names unique
-#define _ICOMMAND(cmdname, name, nargs, proto, b) template<int N> struct cmdname; template<> struct cmdname<__LINE__> { static bool init; static void run proto; }; bool cmdname<__LINE__>::init = addcommand(#name, (void (*)())cmdname<__LINE__>::run, nargs); void cmdname<__LINE__>::run proto \
+#define _ICOMMAND(cmdname, name, nargs, proto, b) template<int N> struct cmdname; template<> struct cmdname<__LINE__> { static bool init; static void run proto; }; bool cmdname<__LINE__>::init = addcommand(name, (void (*)())cmdname<__LINE__>::run, nargs); void cmdname<__LINE__>::run proto \
     { b; }
 #define ICOMMANDNAME(name) _icmd_##name
-#define ICOMMAND(name, nargs, proto, b) _ICOMMAND(ICOMMANDNAME(name), name, nargs, proto, b)
+#define ICOMMAND(name, nargs, proto, b) _ICOMMAND(ICOMMANDNAME(name), #name, nargs, proto, b)
+#define ICOMMANDSNAME _icmds_
+#define ICOMMANDS(name, nargs, proto, b) _ICOMMAND(ICOMMANDSNAME, name, nargs, proto, b)
  
 #define _IVAR(n, m, c, x, b, p) \
     struct var_##n : ident \

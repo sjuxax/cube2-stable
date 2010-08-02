@@ -4,6 +4,7 @@
 namespace game
 {
     VARP(scoreboard2d, 0, 1, 1);
+    VARP(showservinfo, 0, 1, 1);
     VARP(showclientnum, 0, 0, 1);
     VARP(showpj, 0, 0, 1);
     VARP(showping, 0, 1, 1);
@@ -19,6 +20,11 @@ namespace game
             else return 1;
         }
         else if((*b)->state==CS_SPECTATOR) return -1;
+        if(m_ctf)
+        {
+            if((*a)->flags > (*b)->flags) return -1;
+            if((*a)->flags < (*b)->flags) return 1;
+        }
         if((*a)->frags > (*b)->frags) return -1;
         if((*a)->frags < (*b)->frags) return 1;
         return strcmp((*a)->name, (*b)->name);
@@ -82,7 +88,7 @@ namespace game
     static int groupplayers()
     {
         int numgroups = 0;
-        spectators.setsize(0);
+        spectators.shrink(0);
         loopv(players)
         {
             fpsent *o = players[i];
@@ -105,7 +111,7 @@ namespace game
             if(!team) g.score = 0;
             else if(cmode && cmode->hidefrags()) g.score = cmode->getteamscore(o->team);
             else g.score = o->frags;
-            g.players.setsize(0);
+            g.players.shrink(0);
             g.players.add(o);
         }
         loopi(numgroups) groups[i]->players.sort(playersort);
@@ -116,21 +122,41 @@ namespace game
 
     void renderscoreboard(g3d_gui &g, bool firstpass)
     {
-        const char *mname = getclientmap();
-        defformatstring(modemapstr)("%s: %s", server::modename(gamemode), mname[0] ? mname : "[new map]");
-        if(m_timed && mname[0] && minremain >= 0)
+        const ENetAddress *address = connectedpeer();
+        if(showservinfo && address)
         {
-            if(!minremain) concatstring(modemapstr, ", intermission");
-            else
+            string hostname;
+            if(enet_address_get_host_ip(address, hostname, sizeof(hostname)) >= 0)
             {
-                defformatstring(timestr)(", %d %s remaining", minremain, minremain==1 ? "minute" : "minutes");
-                concatstring(modemapstr, timestr);
+                if(servinfo[0]) g.titlef("%.25s", 0xFFFF80, NULL, servinfo);
+                else g.titlef("%s:%d", 0xFFFF80, NULL, hostname, address->port);
             }
         }
-        if(paused || ispaused()) concatstring(modemapstr, ", paused");
+     
+        g.pushlist(0);
+        g.text(server::modename(gamemode), 0xFFFF80);
+        g.separator();
+        const char *mname = getclientmap();
+        g.text(mname[0] ? mname : "[new map]", 0xFFFF80);
+        if(m_timed && mname[0] && (maplimit >= 0 || intermission))
+        {
+            g.separator();
+            if(intermission) g.text("intermission", 0xFFFF80);
+            else 
+            {
+                int secs = max(maplimit-lastmillis, 0)/1000, mins = secs/60;
+                secs %= 60;
+                g.pushlist();
+                g.strut(mins >= 10 ? 4.5f : 3.5f);
+                g.textf("%d:%02d", 0xFFFF80, NULL, mins, secs);
+                g.poplist();
+            }
+        }
+        if(paused || ispaused()) { g.separator(); g.text("paused", 0xFFFF80); }
+        g.poplist();
 
-        g.text(modemapstr, 0xFFFF80, "server");
-    
+        g.separator();
+ 
         int numgroups = groupplayers();
         loopk(numgroups)
         {
@@ -158,7 +184,7 @@ namespace game
                 g.strut(1);
                 g.poplist();
             }
-            g.text("", 0, "server");
+            g.text("", 0, " ");
             loopscoregroup(o,
             {
                 if(o==player1 && highlightscore && (multiplayer(false) || demoplayback || players.length() > 1))
@@ -214,7 +240,7 @@ namespace game
                     g.strut(6);
                     loopscoregroup(o, 
                     {
-                        fpsent *p = getclient(o->ownernum);
+                        fpsent *p = o->ownernum >= 0 ? getclient(o->ownernum) : o;
                         if(!p) p = o;
                         if(!showpj && p->state==CS_LAGGED) g.text("LAG", 0xFFFFDD);
                         else g.textf("%d", 0xFFFFDD, NULL, p->ping);
@@ -267,7 +293,7 @@ namespace game
                 g.pushlist();
                 
                 g.pushlist();
-                g.text("spectator", 0xFFFF80, "server");
+                g.text("spectator", 0xFFFF80, " ");
                 loopv(spectators) 
                 {
                     fpsent *o = spectators[i];
@@ -293,7 +319,7 @@ namespace game
             }
             else
             {
-                g.textf("%d spectator%s", 0xFFFF80, "server", spectators.length(), spectators.length()!=1 ? "s" : "");
+                g.textf("%d spectator%s", 0xFFFF80, " ", spectators.length(), spectators.length()!=1 ? "s" : "");
                 loopv(spectators)
                 {
                     if((i%3)==0) 
@@ -356,7 +382,7 @@ namespace game
 
         void render()
         {
-            if(showing) g3d_addgui(this, menupos, scoreboard2d ? GUI_FORCE_2D : GUI_2D | GUI_FOLLOW);
+            if(showing) g3d_addgui(this, menupos, (scoreboard2d ? GUI_FORCE_2D : GUI_2D | GUI_FOLLOW) | GUI_BOTTOM);
         }
 
     } scoreboard;
