@@ -1,6 +1,8 @@
 // monster.h: implements AI for single player monsters, currently client only
 #include "game.h"
 
+extern int physsteps;
+
 namespace game
 {
     static vector<int> teleports;
@@ -44,8 +46,13 @@ namespace game
         int trigger;                        // millis at which transition to another monsterstate takes place
         vec attacktarget;                   // delayed attacks
         int anger;                          // how many times already hit by fellow monster
+        physent *stacked;
+        vec stackpos;
     
-        monster(int _type, int _yaw, int _tag, int _state, int _trigger, int _move) : monsterstate(_state), tag(_tag)
+        monster(int _type, int _yaw, int _tag, int _state, int _trigger, int _move) :
+            monsterstate(_state), tag(_tag),
+            stacked(NULL),
+            stackpos(0, 0, 0)
         {
             type = ENT_AI;
             respawn();
@@ -79,7 +86,13 @@ namespace game
             anger = 0;
             copystring(name, t.name);
         }
-        
+       
+        void normalize_yaw(float angle)
+        {
+            while(yaw<angle-180.0f) yaw += 360.0f;
+            while(yaw>angle+180.0f) yaw -= 360.0f;
+        }
+ 
         // monster AI is sequenced using transitions: they are in a particular state where
         // they execute a particular behaviour until the trigger time is hit, and then they
         // reevaluate their situation based on the current state, the environment etc., and
@@ -125,7 +138,7 @@ namespace game
                 }
             }
             
-            float enemyyaw = -(float)atan2(enemy->o.x - o.x, enemy->o.y - o.y)/RAD+180;
+            float enemyyaw = -atan2(enemy->o.x - o.x, enemy->o.y - o.y)/RAD;
             
             switch(monsterstate)
             {
@@ -201,7 +214,7 @@ namespace game
                     
             }
 
-            if(move || moving || (onplayer && (onplayer->state!=CS_ALIVE || lastmoveattempt <= onplayer->lastmove)))
+            if(move || maymove() || (stacked && (stacked->state!=CS_ALIVE || stackpos != stacked->o)))
             {
                 vec pos = feetpos();
                 loopv(teleports) // equivalent of player entity touch, but only teleports are used
@@ -211,6 +224,7 @@ namespace game
                     if(dist<16) entities::teleport(teleports[i], this);
                 }
 
+                if(physsteps > 0) stacked = NULL;
                 moveplayer(this, 1, true);        // use physics to move monster
             }
         }
@@ -240,8 +254,7 @@ namespace game
                 lastpain = lastmillis;
                 playsound(monstertypes[mtype].diesound, &o);
                 monsterkilled();
-                superdamage = -health;
-                superdamageeffect(vel, this);
+                gibeffect(max(-health, 0), vel, this);
 
                 defformatstring(id)("monster_dead_%d", tag);
                 if(identexists(id)) execute(id);
@@ -253,6 +266,12 @@ namespace game
             }
         }
     };
+
+    void stackmonster(monster *d, physent *o)
+    {
+        d->stacked = o;
+        d->stackpos = o->o;
+    }
 
     int nummonsters(int tag, int state)
     {
@@ -284,7 +303,7 @@ namespace game
         removetrackeddynlights();
         loopv(monsters) delete monsters[i]; 
         cleardynentcache();
-        monsters.setsize(0);
+        monsters.shrink(0);
         numkilled = 0;
         monstertotal = 0;
         spawnremain = 0;
@@ -310,7 +329,7 @@ namespace game
                 monstertotal++;
             }
         }
-        teleports.setsizenodelete(0);
+        teleports.setsize(0);
         if(m_dmsp || m_classicsp)
         {
             loopv(entities::ents) if(entities::ents[i]->type==TELEPORT) teleports.add(i);
@@ -321,7 +340,7 @@ namespace game
     {
         conoutf(CON_GAMEINFO, allkilled ? "\f2you have cleared the map!" : "\f2you reached the exit!");
         monstertotal = 0;
-        game::addmsg(SV_FORCEINTERMISSION, "r");
+        game::addmsg(N_FORCEINTERMISSION, "r");
     }
     ICOMMAND(endsp, "", (), endsp(false));
 
@@ -369,7 +388,7 @@ namespace game
         loopv(monsters)
         {
             monster &m = *monsters[i];
-            if(m.state!=CS_DEAD || lastmillis-m.lastpain<10000)//m.superdamage<50) 
+            if(m.state!=CS_DEAD || lastmillis-m.lastpain<10000)
             {
                 modelattach vwep[2];
                 vwep[0] = modelattach("tag_weapon", monstertypes[m.mtype].vwepname, ANIM_VWEP_IDLE|ANIM_LOOP, 0);
@@ -394,14 +413,14 @@ namespace game
     {
         conoutf(CON_GAMEINFO, "\f2--- single player time score: ---");
         int pen, score = 0;
-        pen = (totalmillis-maprealtime)/1000; score += pen; if(pen) conoutf(CON_GAMEINFO, "\f2time taken: %d seconds (%d simulated seconds)", pen, (lastmillis-maptime)/1000);
+        pen = ((lastmillis-maptime)*100)/(1000*getvar("gamespeed")); score += pen; if(pen) conoutf(CON_GAMEINFO, "\f2time taken: %d seconds (%d simulated seconds)", pen, (lastmillis-maptime)/1000);
         pen = player1->deaths*60; score += pen; if(pen) conoutf(CON_GAMEINFO, "\f2time penalty for %d deaths (1 minute each): %d seconds", player1->deaths, pen);
         pen = remain*10;          score += pen; if(pen) conoutf(CON_GAMEINFO, "\f2time penalty for %d monsters remaining (10 seconds each): %d seconds", remain, pen);
         pen = (10-skill)*20;      score += pen; if(pen) conoutf(CON_GAMEINFO, "\f2time penalty for lower skill level (20 seconds each): %d seconds", pen);
         pen = 100-accuracy;       score += pen; if(pen) conoutf(CON_GAMEINFO, "\f2time penalty for missed shots (1 second each %%): %d seconds", pen);
         defformatstring(aname)("bestscore_%s", getclientmap());
         const char *bestsc = getalias(aname);
-        int bestscore = *bestsc ? atoi(bestsc) : score;
+        int bestscore = *bestsc ? parseint(bestsc) : score;
         if(score<bestscore) bestscore = score;
         defformatstring(nscore)("%d", bestscore);
         alias(aname, nscore);

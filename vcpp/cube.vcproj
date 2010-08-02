@@ -108,6 +108,7 @@
 			/>
 			<Tool
 				Name="VCManifestTool"
+				AdditionalManifestFiles="dpiaware.manifest"
 			/>
 			<Tool
 				Name="VCXDCMakeTool"
@@ -209,6 +210,7 @@
 			/>
 			<Tool
 				Name="VCManifestTool"
+				AdditionalManifestFiles="dpiaware.manifest"
 			/>
 			<Tool
 				Name="VCXDCMakeTool"
@@ -316,6 +318,7 @@
 			/>
 			<Tool
 				Name="VCManifestTool"
+				AdditionalManifestFiles="dpiaware.manifest"
 			/>
 			<Tool
 				Name="VCXDCMakeTool"
@@ -515,6 +518,10 @@
 				</File>
 				<File
 					RelativePath="..\engine\lightmap.h"
+					>
+				</File>
+				<File
+					RelativePath="..\engine\mpr.h"
 					>
 				</File>
 				<File
@@ -1108,6 +1115,10 @@
 					</FileConfiguration>
 				</File>
 				<File
+					RelativePath="..\engine\iqm.h"
+					>
+				</File>
+				<File
 					RelativePath="..\engine\lensflare.h"
 					>
 				</File>
@@ -1431,6 +1442,10 @@
 					>
 				</File>
 				<File
+					RelativePath="..\engine\smd.h"
+					>
+				</File>
+				<File
 					RelativePath="..\engine\textedit.h"
 					>
 				</File>
@@ -1467,6 +1482,10 @@
 				</File>
 				<File
 					RelativePath="..\engine\texture.h"
+					>
+				</File>
+				<File
+					RelativePath="..\engine\varray.h"
 					>
 				</File>
 				<File
@@ -1866,14 +1885,6 @@
 			Name="FPS"
 			>
 			<File
-				RelativePath="..\fpsgame\ai.h"
-				>
-			</File>
-			<File
-				RelativePath="..\fpsgame\aiman.h"
-				>
-			</File>
-			<File
 				RelativePath="..\fpsgame\ai.cpp"
 				>
 				<FileConfiguration
@@ -1903,6 +1914,14 @@
 						PrecompiledHeaderFile=".\Profile/game.pch"
 					/>
 				</FileConfiguration>
+			</File>
+			<File
+				RelativePath="..\fpsgame\ai.h"
+				>
+			</File>
+			<File
+				RelativePath="..\fpsgame\aiman.h"
+				>
 			</File>
 			<File
 				RelativePath="..\fpsgame\capture.h"

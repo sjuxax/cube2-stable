@@ -1,24 +1,25 @@
 #include "game.h"
 
+extern int fog;
+
 namespace ai
 {
     using namespace game;
 
     avoidset obstacles;
-    int updatemillis = 0, forcegun = -1;
+    int updatemillis = 0, updateiteration = 0, forcegun = -1;
     vec aitarget(0, 0, 0);
 
     VAR(aidebug, 0, 0, 6);
     VAR(aiforcegun, -1, -1, NUMGUNS-1);
 
-    ICOMMAND(addbot, "s", (char *s), addmsg(SV_ADDBOT, "ri", *s ? clamp(atoi(s), 1, 101) : -1));
-    ICOMMAND(delbot, "", (), addmsg(SV_DELBOT, "r"));
-    ICOMMAND(botlimit, "i", (int *n), addmsg(SV_BOTLIMIT, "ri", *n));
-    ICOMMAND(botbalance, "i", (int *n), addmsg(SV_BOTBALANCE, "ri", *n));
+    ICOMMAND(addbot, "s", (char *s), addmsg(N_ADDBOT, "ri", *s ? clamp(parseint(s), 1, 101) : -1));
+    ICOMMAND(delbot, "", (), addmsg(N_DELBOT, "r"));
+    ICOMMAND(botlimit, "i", (int *n), addmsg(N_BOTLIMIT, "ri", *n));
+    ICOMMAND(botbalance, "i", (int *n), addmsg(N_BOTBALANCE, "ri", *n));
 
     float viewdist(int x)
     {
-        int fog = getvar("fog");
         return x <= 100 ? clamp((SIGHTMIN+(SIGHTMAX-SIGHTMIN))/100.f*float(x), float(SIGHTMIN), float(fog)) : float(fog);
     }
 
@@ -37,13 +38,26 @@ namespace ai
         return d->state != CS_DEAD && !intermission;
     }
 
-    bool targetable(fpsent *d, fpsent *e, bool anyone)
+    float weapmindist(int weap)
+    {
+        return guns[weap].projspeed ? RL_DAMRAD : 2;
+    }
+
+    float weapmaxdist(int weap)
+    {
+        return guns[weap].range + 4;
+    }
+
+    bool weaprange(fpsent *d, int weap, float dist)
+    {
+        float mindist = weapmindist(weap), maxdist = weapmaxdist(weap);
+        return dist >= mindist*mindist && dist <= maxdist*maxdist;
+    }
+
+    bool targetable(fpsent *d, fpsent *e)
     {
         if(d == e || !canmove(d)) return false;
-        aistate &b = d->ai->getstate();
-        if(b.type != AI_S_WAIT)
-            return e->state == CS_ALIVE && (!anyone || !isteam(d->team, e->team));
-        return false;
+        return e->state == CS_ALIVE && !isteam(d->team, e->team);
     }
 
     bool getsight(vec &o, float yaw, float pitch, vec &q, vec &v, float mdist, float fovx, float fovy)
@@ -52,9 +66,9 @@ namespace ai
 
         if(dist <= mdist)
         {
-            float x = fabs((asin((q.z-o.z)/dist)/RAD)-pitch);
-            float y = fabs((-(float)atan2(q.x-o.x, q.y-o.y)/PI*180+180)-yaw);
-            if(x <= fovx && y <= fovy) return raycubelos(o, q, v);
+            float x = fmod(fabs(asin((q.z-o.z)/dist)/RAD-pitch), 360);
+            float y = fmod(fabs(-atan2(q.x-o.x, q.y-o.y)/RAD-yaw), 360);
+            if(min(x, 360-x) <= fovx && min(y, 360-y) <= fovy) return raycubelos(o, q, v);
         }
         return false;
     }
@@ -67,15 +81,48 @@ namespace ai
         return false;
     }
 
+    bool canshoot(fpsent *d, fpsent *e)
+    {
+        if(weaprange(d, d->gunselect, e->o.squaredist(d->o)) && targetable(d, e))
+            return d->ammo[d->gunselect] > 0 && lastmillis - d->lastaction >= d->gunwait;
+        return false;
+    }
+
+    bool canshoot(fpsent *d)
+    {
+        return !d->ai->becareful && d->ammo[d->gunselect] > 0 && lastmillis - d->lastaction >= d->gunwait;
+    }
+
+	bool hastarget(fpsent *d, aistate &b, fpsent *e, float yaw, float pitch, float dist)
+	{ // add margins of error
+        if(weaprange(d, d->gunselect, dist) || (d->skill <= 100 && !rnd(d->skill)))
+        {
+            if(d->gunselect == GUN_FIST) return true;
+			float skew = clamp(float(lastmillis-d->ai->enemymillis)/float((d->skill*guns[d->gunselect].attackdelay/200.f)), 0.f, guns[d->gunselect].projspeed ? 0.25f : 1e16f),
+                offy = yaw-d->yaw, offp = pitch-d->pitch;
+            if(offy > 180) offy -= 360;
+            else if(offy < -180) offy += 360;
+            if(fabs(offy) <= d->ai->views[0]*skew && fabs(offp) <= d->ai->views[1]*skew) return true;
+        }
+        return false;
+	}
+
     vec getaimpos(fpsent *d, fpsent *e)
     {
         vec o = e->o;
+        if(d->gunselect == GUN_RL) o.z += (e->aboveeye*0.2f)-(0.8f*d->eyeheight);
+        else if(d->gunselect != GUN_GL) o.z += (e->aboveeye-e->eyeheight)*0.5f;
         if(d->skill <= 100)
         {
-			float optimal = 1.f, scale = 1.f/float(d->skill);
-			if(d->gunselect == GUN_RL) optimal = (e->aboveeye*0.2f)-(0.8f*d->eyeheight);
-			else if(d->gunselect != GUN_GL) optimal = (e->aboveeye-e->eyeheight)*0.5f;
-			o.z += rnd(d->skill) ? optimal*scale : -optimal*scale;
+            if(lastmillis >= d->ai->lastaimrnd)
+            {
+                const int aiskew[NUMGUNS] = { 1, 10, 50, 5, 20, 1, 100, 10, 10, 10, 1, 1 };
+                #define rndaioffset(r) ((rnd(int(r*aiskew[d->gunselect]*2)+1)-(r*aiskew[d->gunselect]))*(1.f/float(max(d->skill, 1))))
+                loopk(3) d->ai->aimrnd[k] = rndaioffset(e->radius);
+                int dur = (d->skill+10)*10;
+                d->ai->lastaimrnd = lastmillis+dur+rnd(dur);
+            }
+            loopk(3) o[k] += d->ai->aimrnd[k];
         }
         return o;
     }
@@ -83,12 +130,6 @@ namespace ai
     void create(fpsent *d)
     {
         if(!d->ai) d->ai = new aiinfo;
-        if(d->ai)
-        {
-            d->ai->views[0] = viewfieldx(d->skill);
-            d->ai->views[1] = viewfieldy(d->skill);
-            d->ai->views[2] = viewdist(d->skill);
-        }
     }
 
     void destroy(fpsent *d)
@@ -128,29 +169,40 @@ namespace ai
         d->playermodel = chooserandomplayermodel(pm);
 
         if(resetthisguy) removeweapons(d);
-        if(player1->clientnum == d->ownernum) create(d);
+        if(d->ownernum >= 0 && player1->clientnum == d->ownernum)
+        {
+            create(d);
+            if(d->ai)
+            {
+                d->ai->views[0] = viewfieldx(d->skill);
+                d->ai->views[1] = viewfieldy(d->skill);
+                d->ai->views[2] = viewdist(d->skill);
+            }
+        }
         else if(d->ai) destroy(d);
     }
 
     void update()
     {
-        bool updating = lastmillis-updatemillis > 100; // fixed rate logic at 10fps
-        if(updating)
+        if(intermission) { loopv(players) if(players[i]->ai) players[i]->stopmoving(); }
+        else // fixed rate logic done out-of-sequence at 1 frame per second for each ai
         {
-        	avoid();
-        	forcegun = multiplayer(false) ? -1 : aiforcegun;
+            if(!updateiteration && lastmillis-updatemillis > 1000)
+            {
+                avoid();
+                forcegun = multiplayer(false) ? -1 : aiforcegun;
+                updateiteration = 1;
+                updatemillis = lastmillis;
+            }
+            int count = 0;
+            loopv(players) if(players[i]->ai) think(players[i], ++count == updateiteration ? true : false);
+            if(++updateiteration > count) updateiteration = 0;
         }
-		loopv(players) if(players[i]->ai)
-		{
-			if(!intermission) think(players[i], updating);
-			else players[i]->stopmoving();
-		}
-		if(updating) updatemillis = lastmillis;
     }
 
     bool checkothers(vector<int> &targets, fpsent *d, int state, int targtype, int target, bool teams)
     { // checks the states of other ai for a match
-        targets.setsizenodelete(0);
+        targets.setsize(0);
         loopv(players)
         {
             fpsent *e = players[i];
@@ -166,46 +218,30 @@ namespace ai
         return !targets.empty();
     }
 
-    bool makeroute(fpsent *d, aistate &b, int node, bool changed, bool check)
+    bool makeroute(fpsent *d, aistate &b, int node, bool changed, bool retry)
     {
-        int n = node;
-        if((n == d->lastnode || d->ai->hasprevnode(n)) && waypoints.inrange(d->lastnode))
-        {
-            waypoint &w = waypoints[d->lastnode];
-            static vector<int> noderemap; noderemap.setsizenodelete(0);
-            if(w.links[0]) loopi(MAXWAYPOINTLINKS)
-            {
-                int link = w.links[i];
-                if(!link) break;
-                if(link != d->lastnode && !d->ai->hasprevnode(link))
-                    noderemap.add(link);
-            }
-            if(!noderemap.empty()) n = noderemap[rnd(noderemap.length())];
-        }
-        if(n != d->lastnode)
-        {
-            if(changed && !d->ai->route.empty() && d->ai->route[0] == n) return true;
-            if(route(d, d->lastnode, n, d->ai->route, obstacles, check))
-            {
-                b.override = false;
-                return true;
-            }
-        }
-        d->ai->route.setsize(0);
-		if(check) return makeroute(d, b, n, true, false);
-        return false;
+        if(!waypoints.inrange(d->lastnode)) return false;
+		if(changed && d->ai->route.length() > 1 && d->ai->route[0] == node) return true;
+		if(route(d, d->lastnode, node, d->ai->route, obstacles, retry))
+		{
+			b.override = false;
+			return true;
+		}
+		d->ai->clear(true);
+		if(!retry) return makeroute(d, b, node, false, true);
+		return false;
     }
 
-    bool makeroute(fpsent *d, aistate &b, const vec &pos, bool changed, bool check)
+    bool makeroute(fpsent *d, aistate &b, const vec &pos, bool changed, bool retry)
     {
-        int node = closestwaypoint(pos, NEARDIST, true);
-        return makeroute(d, b, node, changed, check);
+        int node = closestwaypoint(pos, SIGHTMIN, true);
+        return makeroute(d, b, node, changed, retry);
     }
 
     bool randomnode(fpsent *d, aistate &b, const vec &pos, float guard, float wander)
     {
         static vector<int> candidates;
-        candidates.setsizenodelete(0);
+        candidates.setsize(0);
         findwaypointswithin(pos, guard, wander, candidates);
 
         while(!candidates.empty())
@@ -227,40 +263,25 @@ namespace ai
         return false;
     }
 
-    bool enemy(fpsent *d, aistate &b, const vec &pos, float guard = NEARDIST, bool pursue = false)
+    bool enemy(fpsent *d, aistate &b, const vec &pos, float guard = SIGHTMIN, bool pursue = false)
     {
-        if(canmove(d))
+        fpsent *t = NULL;
+        vec dp = d->headpos();
+        float mindist = guard*guard, bestdist = 1e16f;
+        loopv(players)
         {
-            fpsent *t = NULL;
-            vec dp = d->headpos(), tp(0, 0, 0);
-            bool insight = false, tooclose = false;
-            float mindist = guard*guard;
-            loopv(players)
+            fpsent *e = players[i];
+            if(e == d || !targetable(d, e)) continue;
+            vec ep = getaimpos(d, e);
+            float dist = ep.squaredist(dp);
+            if(dist < bestdist && (cansee(d, dp, ep) || dist <= mindist))
             {
-                fpsent *e = players[i];
-                if(e == d || !targetable(d, e, true)) continue;
-                vec ep = getaimpos(d, e);
-                bool close = ep.squaredist(pos) < mindist;
-                if(!t || ep.squaredist(dp) < tp.squaredist(dp) || close)
-                {
-                    bool see = cansee(d, dp, ep);
-                    if(!insight || see || close)
-                    {
-                        t = e; tp = ep;
-                        if(!insight && see) insight = see;
-                        if(!tooclose && close) tooclose = close;
-                    }
-                }
+                t = e;
+                bestdist = dist;
             }
-            if(t && violence(d, b, t, pursue && (tooclose || insight))) return insight || tooclose;
         }
+        if(t && violence(d, b, t, pursue)) return true;
         return false;
-    }
-
-    void noenemy(fpsent *d)
-    {
-        d->ai->enemy = -1;
-        d->ai->enemymillis = 0;
     }
 
     bool patrol(fpsent *d, aistate &b, const vec &pos, float guard, float wander, int walk, bool retry)
@@ -273,14 +294,16 @@ namespace ai
                 b.override = true;
                 return true;
             }
-            else if(!d->ai->route.empty()) return true;
-            else if(!retry)
+            else if(d->ai->route.empty())
             {
+                if(!retry)
+                {
+                    b.override = false;
+                    return patrol(d, b, pos, guard, wander, walk, true);
+                }
                 b.override = false;
-                return patrol(d, b, pos, guard, wander, walk, true);
+                return false;
             }
-            b.override = false;
-            return false;
         }
         b.override = false;
         return true;
@@ -288,41 +311,45 @@ namespace ai
 
     bool defend(fpsent *d, aistate &b, const vec &pos, float guard, float wander, int walk)
     {
-		bool hasenemy = enemy(d, b, pos, wander, false);
-		if(!walk && d->feetpos().squaredist(pos) <= guard*guard)
+		bool hasenemy = enemy(d, b, pos, wander, d->gunselect == GUN_FIST);
+		if(!walk)
 		{
-			b.idle = hasenemy ? 2 : 1;
-			return true;
+		    if(d->feetpos().squaredist(pos) <= guard*guard)
+		    {
+                b.idle = hasenemy ? 2 : 1;
+                return true;
+		    }
+		    walk++;
 		}
         return patrol(d, b, pos, guard, wander, walk);
     }
 
     bool violence(fpsent *d, aistate &b, fpsent *e, bool pursue)
     {
-        if(targetable(d, e, true))
+        if(e && targetable(d, e))
         {
-            if(pursue || d->gunselect == GUN_FIST || (b.type == AI_S_INTEREST && b.targtype == AI_T_NODE))
-                d->ai->addstate(AI_S_PURSUE, AI_T_PLAYER, e->clientnum);
-            if(d->ai->enemy != e->clientnum) d->ai->enemymillis = lastmillis;
-            d->ai->enemy = e->clientnum;
-            d->ai->enemyseen = lastmillis;
-            vec dp = d->headpos(), ep = getaimpos(d, e);
-            if(!cansee(d, dp, ep)) d->ai->enemyseen -= ((111-d->skill)*10)+10; // so we don't "quick"
+            if(pursue && waypoints.inrange(d->lastnode)) d->ai->switchstate(b, AI_S_PURSUE, AI_T_PLAYER, e->clientnum);
+            if(d->ai->enemy != e->clientnum)
+            {
+                d->ai->enemyseen = d->ai->enemymillis = lastmillis;
+                d->ai->enemy = e->clientnum;
+            }
             return true;
         }
         return false;
     }
 
-    bool target(fpsent *d, aistate &b, bool pursue = false, bool force = false)
+    bool target(fpsent *d, aistate &b, bool pursue = false, bool force = false, float mindist = 0.f)
     {
         fpsent *t = NULL;
         vec dp = d->headpos(), tp(0, 0, 0);
         loopv(players)
         {
             fpsent *e = players[i];
-            if(e == d || !targetable(d, e, true)) continue;
+            if(e == d || !targetable(d, e)) continue;
             vec ep = getaimpos(d, e);
-            if((!t || ep.squaredist(dp) < tp.squaredist(dp)) && (force || cansee(d, dp, ep)))
+            float dist = ep.squaredist(dp);
+            if((!t || dist < tp.squaredist(dp)) && ((mindist > 0 && dist <= mindist) || force || cansee(d, dp, ep)))
             {
                 t = e;
                 tp = ep;
@@ -342,7 +369,7 @@ namespace ai
         return false;
     }
 
-    void assist(fpsent *d, aistate &b, vector<interest> &interests, bool all = false, bool force = false)
+    void assist(fpsent *d, aistate &b, vector<interest> &interests, bool all, bool force)
     {
         loopv(players)
         {
@@ -353,44 +380,48 @@ namespace ai
             n.node = e->lastnode;
             n.target = e->clientnum;
             n.targtype = AI_T_PLAYER;
-            n.score = e->o.squaredist(d->o)/(force || hasgoodammo(d) ? 10.f : 1.f);
+            n.score = e->o.squaredist(d->o)/(hasgoodammo(d) ? 1e8f : (force ? 1e4f : 1e2f));
         }
     }
 
     static void tryitem(fpsent *d, extentity &e, int id, aistate &b, vector<interest> &interests, bool force = false)
     {
-        float score = 1.0f;
-        if(force) score = 100.0f;
-        else switch(e.type)
+        float score = 0;
+        switch(e.type)
         {
             case I_HEALTH:
-                if(d->health < min(d->skill, 75)) score = 100.0f;
+                if(d->health < min(d->skill, 75)) score = 1e3f;
                 break;
-            case I_QUAD: score = 70.0f; break;
-            case I_BOOST: score = 50.0f; break;
+            case I_QUAD: score = 1e3f; break;
+            case I_BOOST: score = 1e2f; break;
             case I_GREENARMOUR: case I_YELLOWARMOUR:
             {
                 int atype = A_GREEN + e.type - I_GREENARMOUR;
-                if(atype > d->armourtype) score = atype == A_YELLOW ? 50.0f : 25.0f;
-                else if(d->armour < 50) score = 20.0f;
+                if(atype > d->armourtype) score = atype == A_YELLOW ? 1e2f : 1e1f;
+                else if(d->armour < 50) score = 1e1f;
                 break;
             }
             default:
-                if(e.type >= I_SHELLS && e.type <= I_CARTRIDGES)
+            {
+                if(e.type >= I_SHELLS && e.type <= I_CARTRIDGES && !d->hasmaxammo(e.type))
                 {
                     int gun = e.type - I_SHELLS + GUN_SG;
                     // go get a weapon upgrade
-                    if(gun == d->ai->weappref) score = 100.0f;
-                    else if(isgoodammo(gun)) score = hasgoodammo(d) ? 15.0f : 75.0f;
+                    if(gun == d->ai->weappref) score = 1e8f;
+                    else if(isgoodammo(gun)) score = hasgoodammo(d) ? 1e2f : 1e4f;
                 }
                 break;
+            }
         }
-        interest &n = interests.add();
-        n.state = AI_S_INTEREST;
-        n.node = closestwaypoint(e.o, NEARDIST, true);
-        n.target = id;
-        n.targtype = AI_T_ENTITY;
-        n.score = d->feetpos().squaredist(e.o)/score;
+        if(score != 0)
+        {
+            interest &n = interests.add();
+            n.state = AI_S_INTEREST;
+            n.node = closestwaypoint(e.o, SIGHTMIN, true);
+            n.target = id;
+            n.targtype = AI_T_ENTITY;
+            n.score = d->feetpos().squaredist(e.o)/(force ? -1 : score);
+        }
     }
 
     void items(fpsent *d, aistate &b, vector<interest> &interests, bool force = false)
@@ -405,10 +436,34 @@ namespace ai
 
     static vector<int> targets;
 
+    bool parseinterests(fpsent *d, aistate &b, vector<interest> &interests, bool override, bool ignore)
+    {
+        while(!interests.empty())
+        {
+            int q = interests.length()-1;
+            loopi(interests.length()-1) if(interests[i].score < interests[q].score) q = i;
+            interest n = interests.removeunordered(q);
+            bool proceed = true;
+            if(!ignore) switch(n.state)
+            {
+                case AI_S_DEFEND: // don't get into herds
+                    proceed = !checkothers(targets, d, n.state, n.targtype, n.target, true);
+                    break;
+                default: break;
+            }
+            if(proceed && makeroute(d, b, n.node, false))
+            {
+                d->ai->switchstate(b, n.state, n.targtype, n.target);
+                return true;
+            }
+        }
+        return false;
+    }
+
     bool find(fpsent *d, aistate &b, bool override = false)
     {
         static vector<interest> interests;
-        interests.setsizenodelete(0);
+        interests.setsize(0);
         if(!m_noitems)
         {
             if((!m_noammo && !hasgoodammo(d)) || d->health < min(d->skill - 15, 75))
@@ -416,7 +471,7 @@ namespace ai
             else
             {
                 static vector<int> nearby;
-                nearby.setsizenodelete(0);
+                nearby.setsize(0);
                 findents(I_SHELLS, I_QUAD, false, d->feetpos(), vec(32, 32, 24), nearby);
                 loopv(nearby)
                 {
@@ -428,6 +483,14 @@ namespace ai
         }
         if(cmode) cmode->aifind(d, b, interests);
         if(m_teammode) assist(d, b, interests);
+        return parseinterests(d, b, interests, override);
+    }
+
+    bool findassist(fpsent *d, aistate &b, bool override = false)
+    {
+        static vector<interest> interests;
+        interests.setsize(0);
+        assist(d, b, interests);
         while(!interests.empty())
         {
             int q = interests.length()-1;
@@ -443,7 +506,7 @@ namespace ai
             }
             if(proceed && makeroute(d, b, n.node, false))
             {
-                d->ai->setstate(n.state, n.targtype, n.target, override);
+                d->ai->switchstate(b, n.state, n.targtype, n.target);
                 return true;
             }
         }
@@ -452,28 +515,36 @@ namespace ai
 
     void damaged(fpsent *d, fpsent *e)
     {
-        if(d->ai && canmove(d) && targetable(d, e, true)) // see if this ai is interested in a grudge
+        if(d->ai && canmove(d) && targetable(d, e)) // see if this ai is interested in a grudge
         {
             aistate &b = d->ai->getstate();
-            if(violence(d, b, e, false)) return;
+            if(violence(d, b, e, d->gunselect == GUN_FIST)) return;
         }
         if(checkothers(targets, d, AI_S_DEFEND, AI_T_PLAYER, d->clientnum, true))
         {
             loopv(targets)
             {
                 fpsent *t = getclient(targets[i]);
-                if(!t->ai || !canmove(t) || !targetable(t, e, true)) continue;
+                if(!t->ai || !canmove(t) || !targetable(t, e)) continue;
                 aistate &c = t->ai->getstate();
-                if(violence(t, c, e, false)) return;
+                if(violence(t, c, e, d->gunselect == GUN_FIST)) return;
             }
         }
     }
 
+    void findorientation(vec &o, float yaw, float pitch, vec &pos)
+    {
+        vec dir;
+        vecfromyawpitch(yaw, pitch, 1, 0, dir);
+        if(raycubepos(o, dir, pos, 0, RAY_CLIPMAT|RAY_SKIPFIRST) == -1)
+            pos = dir.mul(2*getworldsize()).add(o); //otherwise 3dgui won't work when outside of map
+    }
+
     void setup(fpsent *d, bool tryreset = false)
     {
+        d->ai->clearsetup();
         d->ai->reset(tryreset);
-        aistate &b = d->ai->getstate();
-        b.next = lastmillis+((111-d->skill)*10)+rnd((111-d->skill)*10);
+        d->ai->lastrun = lastmillis;
         if(m_insta) d->ai->weappref = GUN_RIFLE;
         else
         {
@@ -481,6 +552,8 @@ namespace ai
         	else if(m_noammo) d->ai->weappref = -1;
 			else d->ai->weappref = rnd(GUN_GL-GUN_SG+1)+GUN_SG;
         }
+        vec dp = d->headpos();
+        findorientation(dp, d->yaw, d->pitch, d->ai->target);
     }
 
     void spawned(fpsent *d)
@@ -493,6 +566,44 @@ namespace ai
         if(d->ai) d->ai->reset();
     }
 
+    void itemspawned(int ent)
+    {
+        if(entities::ents.inrange(ent) && entities::ents[ent]->type >= I_SHELLS && entities::ents[ent]->type <= I_QUAD)
+        {
+            loopv(players) if(players[i] && players[i]->ai && players[i]->aitype == AI_BOT && players[i]->canpickup(entities::ents[ent]->type))
+            {
+                fpsent *d = players[i];
+                bool wantsitem = false;
+                switch(entities::ents[ent]->type)
+                {
+                    case I_BOOST: case I_HEALTH: wantsitem = badhealth(d); break;
+                    case I_GREENARMOUR: case I_YELLOWARMOUR: case I_QUAD: break;
+                    default:
+                    {
+                        itemstat &is = itemstats[entities::ents[ent]->type-I_SHELLS];
+                        wantsitem = isgoodammo(is.info) && d->ammo[is.info] <= (d->ai->weappref == is.info ? is.add : is.add/2);
+                        break;
+                    }
+                }
+                if(wantsitem)
+                {
+                    aistate &b = d->ai->getstate();
+                    if(b.type == AI_S_PURSUE && b.targtype == AI_T_AFFINITY) continue;
+                    if(b.type == AI_S_INTEREST && b.targtype == AI_T_ENTITY)
+                    {
+                        if(entities::ents.inrange(b.target))
+                        {
+                            if(d->o.squaredist(entities::ents[ent]->o) < d->o.squaredist(entities::ents[b.target]->o))
+                                d->ai->switchstate(b, AI_S_INTEREST, AI_T_ENTITY, ent);
+                        }
+                        continue;
+                    }
+                    d->ai->switchstate(b, AI_S_INTEREST, AI_T_ENTITY, ent);
+                }
+            }
+        }
+    }
+
     bool check(fpsent *d, aistate &b)
     {
         if(cmode && cmode->aicheck(d, b)) return true;
@@ -501,12 +612,11 @@ namespace ai
 
     int dowait(fpsent *d, aistate &b)
     {
-        if(check(d, b)) return 1;
-        if(find(d, b)) return 1;
+        if(check(d, b) || find(d, b)) return 1;
         if(target(d, b, true, true)) return 1;
-        if(randomnode(d, b, NEARDIST, 1e16f))
+        if(randomnode(d, b, SIGHTMIN, 1e16f))
         {
-            d->ai->addstate(AI_S_INTEREST, AI_T_NODE, d->ai->route[0]);
+            d->ai->switchstate(b, AI_S_INTEREST, AI_T_NODE, d->ai->route[0]);
             return 1;
         }
         return 0; // but don't pop the state
@@ -531,6 +641,7 @@ namespace ai
                     break;
                 case AI_T_PLAYER:
                 {
+                    if(check(d, b)) return 1;
                     fpsent *e = getclient(b.target);
                     if(e && e->state == CS_ALIVE) return defend(d, b, e->feetpos()) ? 1 : 0;
                     break;
@@ -547,14 +658,20 @@ namespace ai
         switch(b.targtype)
         {
             case AI_T_NODE:
-                return !d->ai->route.empty() ? 1 : 0;
+                if(check(d, b)) return 1;
+				if(d->lastnode != b.target && waypoints.inrange(b.target))
+					return makeroute(d, b, b.target) ? 1 : 0;
+				break;
             case AI_T_ENTITY:
-                if(d->hasammo(d->ai->weappref)) return 0;
                 if(entities::ents.inrange(b.target))
                 {
                     extentity &e = *(extentity *)entities::ents[b.target];
-                    if(e.type < I_SHELLS || e.type > I_CARTRIDGES) return 0;
-                    if(!e.spawned || d->hasmaxammo(e.type)) return 0;
+                    if(!e.spawned || e.type < I_SHELLS || e.type > I_CARTRIDGES || d->hasmaxammo(e.type)) return 0;
+                    if(d->feetpos().squaredist(e.o) <= CLOSEDIST*CLOSEDIST)
+                    {
+                        b.idle = 1;
+                        return true;
+                    }
                     return makeroute(d, b, e.o) ? 1 : 0;
                 }
                 break;
@@ -576,10 +693,11 @@ namespace ai
 
                 case AI_T_PLAYER:
                 {
+                    //if(check(d, b)) return 1;
                     fpsent *e = getclient(b.target);
                     if(e && e->state == CS_ALIVE)
                     {
-                    	float guard = NEARDIST, wander = guns[d->gunselect].range;
+                    	float guard = SIGHTMIN, wander = guns[d->gunselect].range;
                     	if(d->gunselect == GUN_FIST) guard = 0.f;
                     	return patrol(d, b, e->feetpos(), guard, wander) ? 1 : 0;
                     }
@@ -591,17 +709,17 @@ namespace ai
         return 0;
     }
 
-    int closenode(fpsent *d, bool force = false)
+    int closenode(fpsent *d, bool retry = false)
     {
         vec pos = d->feetpos();
         int node = -1;
-        float mindist = NEARDISTSQ;
-        loopv(d->ai->route) if(waypoints.inrange(d->ai->route[i]) && (force || (d->ai->route[i] != d->lastnode && !d->ai->hasprevnode(d->ai->route[i]))))
+        float mindist = SIGHTMIN*SIGHTMIN;
+        loopv(d->ai->route) if(waypoints.inrange(d->ai->route[i]))
         {
             waypoint &w = waypoints[d->ai->route[i]];
             vec wpos = w.o;
-            int id = obstacles.remap(d, d->ai->route[i], wpos);
-            if(waypoints.inrange(id) && (force || id == d->ai->route[i] || !d->ai->hasprevnode(id)))
+            int id = obstacles.remap(d, d->ai->route[i], wpos, retry);
+            if(waypoints.inrange(id) && (retry || id == d->ai->route[i] || !d->ai->hasprevnode(id)))
             {
                 float dist = wpos.squaredist(pos);
                 if(dist < mindist)
@@ -614,17 +732,18 @@ namespace ai
         return node;
     }
 
-    bool wpspot(fpsent *d, int n, bool force = false)
+    bool wpspot(fpsent *d, int n, bool retry = false)
     {
         if(waypoints.inrange(n))
         {
             waypoint &w = waypoints[n];
             vec wpos = w.o;
-            int id = obstacles.remap(d, n, wpos);
-            if(waypoints.inrange(id) && (force || id == n || !d->ai->hasprevnode(id)))
+            int id = obstacles.remap(d, n, wpos, retry);
+            if(waypoints.inrange(id) && (retry || id == n || !d->ai->hasprevnode(id)))
             {
-                d->ai->spot = wpos;
-                return true;
+				d->ai->spot = wpos;
+				d->ai->targnode = n;
+				return true;
             }
         }
         return false;
@@ -634,115 +753,88 @@ namespace ai
     {
         if(!waypoints.inrange(d->lastnode)) return false;
         waypoint &w = waypoints[d->lastnode];
-        vec dir = vec(w.o).sub(d->feetpos());
-        if(d->timeinair || dir.magnitude() <= CLOSEDIST || retry)
-        {
-            static vector<int> anyremap; anyremap.setsizenodelete(0);
-            waypoint &w = waypoints[d->lastnode];
-            if(w.links[0])
-            {
-                loopi(MAXWAYPOINTLINKS)
-                {
-                    int link = w.links[i];
-                    if(!link) break;
-                    if(waypoints.inrange(link) && link != d->lastnode && (retry || !d->ai->hasprevnode(link)))
-                        anyremap.add(link);
-                }
-            }
-            while(!anyremap.empty())
-            {
-                int r = rnd(anyremap.length()), t = anyremap[r];
-                if(wpspot(d, t, retry)) return true;
-                anyremap.remove(r);
-            }
-        }
-        if(!retry)
-        {
-            if(wpspot(d, d->lastnode, true)) return true;
-            return anynode(d, b, true);
-        }
+		static vector<int> anyremap; anyremap.setsize(0);
+		if(w.links[0])
+		{
+			loopi(MAXWAYPOINTLINKS)
+			{
+				int link = w.links[i];
+				if(!link) break;
+				if(waypoints.inrange(link) && (retry || !d->ai->hasprevnode(link)))
+					anyremap.add(link);
+			}
+		}
+		while(!anyremap.empty())
+		{
+			int r = rnd(anyremap.length()), t = anyremap[r];
+			if(wpspot(d, t, retry))
+			{
+				d->ai->route.add(t);
+				d->ai->route.add(d->lastnode);
+				return true;
+			}
+			anyremap.remove(r);
+		}
+		if(!retry) return anynode(d, b, true);
         return false;
     }
 
-    bool hunt(fpsent *d, aistate &b, int retries = 0)
-    {
-        if(!d->ai->route.empty())
-        {
-            bool alternate = (retries%2)!=0;
-            int n = alternate ? closenode(d, retries == 3) : d->ai->route.find(d->lastnode);
-            if(!alternate && d->ai->route.inrange(n))
-            {
-                while(d->ai->route.length() > n+1) d->ai->route.pop(); // waka-waka-waka-waka
-                if(!n)
-                {
-                    if(wpspot(d, d->ai->route[n], retries > 1))
-                    {
-                        if(vec(d->ai->spot).sub(d->feetpos()).magnitude() <= CLOSEDIST/2.f)
-                        {
-                            d->ai->dontmove = true;
-                            d->ai->route.setsize(0);
-                        }
-                        return true; // this is our goal?
-                    }
-                    else return anynode(d, b);
-                }
-                else n--; // otherwise, we want the next in line
-            }
-            if(d->ai->route.inrange(n) && wpspot(d, d->ai->route[n], retries > 1)) return true;
-            if(retries < 3) return hunt(d, b, retries+1); // try again
-            d->ai->route.setsize(0);
-        }
-        b.override = false;
-        return anynode(d, b);
-    }
-
-    bool hastarget(fpsent *d, aistate &b, fpsent *e)
-    { // add margins of error
-        if(d->skill <= 100 && !rnd(d->skill*10)) return true; // random margin of error
-        vec dp = d->headpos(), ep = getaimpos(d, e);
-        fpsent *h = (fpsent *)intersectclosest(dp, d->ai->target, d);
-        if(h && !targetable(d, h, true)) return false;
-        float targyaw, targpitch, mindist = d->radius*d->radius, dist = dp.squaredist(ep), range = guns[d->gunselect].range + d->radius;
-        if(guns[d->gunselect].projspeed && (b.type != AI_S_DEFEND || b.targtype != AI_T_AFFINITY)) mindist = RL_DAMRAD*RL_DAMRAD; // do if we're stuck guarding
-        if(d->skill <= 100) mindist -= mindist*(1.f/float(d->skill));
-        if((d->gunselect == GUN_FIST || mindist <= dist) && dist <= range*range)
-        {
-            if(d->skill > 100 && h) return true;
-            vec dir = vec(dp).sub(ep).normalize();
-            vectoyawpitch(dir, targyaw, targpitch);
-            float rtime = (d->skill*guns[d->gunselect].attackdelay/200.f),
-                    skew = clamp(float(lastmillis-d->ai->enemymillis)/float(rtime), 0.f, guns[d->gunselect].projspeed ? 1.f : 1e16f),
-                        cyaw = fabs(targyaw-d->yaw), cpitch = fabs(targpitch-d->pitch);
-            if(cyaw <= d->ai->views[0]*skew && cpitch <= d->ai->views[1]*skew) return true;
-        }
-        return false;
-    }
+	bool hunt(fpsent *d, aistate &b, int retries = 0)
+	{
+		if(!d->ai->route.empty() && waypoints.inrange(d->lastnode))
+		{
+			int n = retries%2 ? d->ai->route.find(d->lastnode) : closenode(d, retries >= 2);
+			if(retries%2 && d->ai->route.inrange(n))
+			{
+				while(d->ai->route.length() > n+1) d->ai->route.pop(); // waka-waka-waka-waka
+				if(!n)
+				{
+					if(wpspot(d, d->ai->route[n], retries >= 2))
+					{
+						d->ai->clear(false);
+						return true;
+					}
+					else if(retries <= 2) return hunt(d, b, retries+1); // try again
+				}
+				else n--; // otherwise, we want the next in line
+			}
+			if(d->ai->route.inrange(n) && wpspot(d, d->ai->route[n], retries >= 2)) return true;
+			if(retries <= 2) return hunt(d, b, retries+1); // try again
+		}
+		b.override = false;
+		d->ai->clear(false);
+		return anynode(d, b);
+	}
 
     void jumpto(fpsent *d, aistate &b, const vec &pos)
     {
-        vec off = vec(pos).sub(d->feetpos()), dir(off.x, off.y, 0);
-        bool offground = d->timeinair && !d->inwater, jumper = off.z >= JUMPMIN,
-            jump = jumper || lastmillis >= d->ai->jumprand;
-        if(jump)
-        {
-            if(offground || lastmillis < d->ai->jumpseed) jump = false;
-            else
-            {
-                vec old = d->o;
-                d->o = vec(pos).add(vec(0, 0, d->eyeheight));
-                if(!collide(d, vec(0, 0, 1))) jump = false;
-                d->o = old;
-            }
-        }
-        if(jump)
-        {
-            d->jumping = true;
-            //d->ai->dontmove = true; // going up
-            int seed = (111-d->skill)*10;
-            d->ai->jumpseed = lastmillis+seed+rnd(seed);
-            seed *= b.idle ? 25 : 50;
-            d->ai->jumprand = lastmillis+seed+rnd(seed);
-        }
+		vec off = vec(pos).sub(d->feetpos()), dir(off.x, off.y, 0);
+		bool offground = d->timeinair && !d->inwater, jumper = off.z >= JUMPMIN,
+			jump = !offground && (jumper || lastmillis >= d->ai->jumprand) && lastmillis >= d->ai->jumpseed;
+		if(jump)
+		{
+			vec old = d->o;
+			d->o = vec(pos).add(vec(0, 0, d->eyeheight));
+			if(!collide(d, vec(0, 0, 1))) jump = false;
+			d->o = old;
+			if(jump)
+			{
+				float radius = 18*18;
+				loopv(entities::ents) if(entities::ents[i]->type == JUMPPAD)
+				{
+					fpsentity &e = *(fpsentity *)entities::ents[i];
+					if(e.o.squaredist(pos) <= radius) { jump = false; break; }
+				}
+			}
+		}
+		if(jump)
+		{
+			d->jumping = true;
+			int seed = (111-d->skill)*(d->inwater ? 2 : 10);
+			d->ai->jumpseed = lastmillis+seed+rnd(seed);
+			seed *= b.idle ? 50 : 25;
+			d->ai->jumprand = lastmillis+seed+rnd(seed);
+		}
     }
 
     void fixfullrange(float &yaw, float &pitch, float &roll, bool full)
@@ -774,7 +866,7 @@ namespace ai
     void getyawpitch(const vec &from, const vec &pos, float &yaw, float &pitch)
     {
         float dist = from.dist(pos);
-        yaw = -(float)atan2(pos.x-from.x, pos.y-from.y)/PI*180+180;
+        yaw = -atan2(pos.x-from.x, pos.y-from.y)/RAD;
         pitch = asin((pos.z-from.z)/dist)/RAD;
     }
 
@@ -806,17 +898,26 @@ namespace ai
         fixrange(yaw, pitch);
     }
 
-    bool canshoot(fpsent *d)
+    bool lockon(fpsent *d, fpsent *e, float maxdist)
     {
-        return d->ammo[d->gunselect] > 0 && lastmillis - d->lastaction >= d->gunwait;
+        if(d->gunselect == GUN_FIST && !d->blocked && !d->timeinair)
+        {
+            vec dir = vec(e->o).sub(d->o);
+            float xydist = dir.x*dir.x+dir.y*dir.y, zdist = dir.z*dir.z, mdist = maxdist*maxdist, ddist = d->radius*d->radius+e->radius*e->radius;
+            if(zdist <= ddist && xydist >= ddist+4 && xydist <= mdist+ddist) return true;
+        }
+        return false;
     }
 
     int process(fpsent *d, aistate &b)
     {
-        int result = 0, stupify = d->skill <= 30+rnd(20) ? rnd(d->skill*1111) : 0, skmod = (111-d->skill)*10;
-        float frame = float(lastmillis-d->ai->lastrun)/float(skmod/2);
+        int result = 0, stupify = d->skill <= 10+rnd(15) ? rnd(d->skill*1000) : 0, skmod = 101-d->skill;
+        float frame = d->skill <= 100 ? float(lastmillis-d->ai->lastrun)/float(max(skmod,1)*10) : 1;
         vec dp = d->headpos();
-        if(b.idle == 1 || (stupify && stupify <= skmod))
+
+        bool idle = b.idle == 1 || (stupify && stupify <= skmod);
+        d->ai->dontmove = false;
+        if(idle)
         {
             d->ai->lastaction = d->ai->lasthunt = lastmillis;
             d->ai->dontmove = true;
@@ -826,73 +927,98 @@ namespace ai
             getyawpitch(dp, vec(d->ai->spot).add(vec(0, 0, d->eyeheight)), d->ai->targyaw, d->ai->targpitch);
             d->ai->lasthunt = lastmillis;
         }
-        else d->ai->dontmove = true;
+        else idle = d->ai->dontmove = true;
+
 		if(!d->ai->dontmove) jumpto(d, b, d->ai->spot);
 
         fpsent *e = getclient(d->ai->enemy);
-        if(d->skill > 90 && (!e || !targetable(d, e, true))) e = (fpsent *)intersectclosest(dp, d->ai->target, d);
-        if(e && targetable(d, e, true))
+        bool enemyok = e && targetable(d, e);
+        if(!enemyok || d->skill >= 50)
+        {
+            fpsent *f = (fpsent *)intersectclosest(dp, d->ai->target, d);
+            if(f)
+            {
+                if(targetable(d, f))
+                {
+                    if(!enemyok) violence(d, b, f, d->gunselect == GUN_FIST);
+                    enemyok = true;
+                    e = f;
+                }
+                else enemyok = false;
+            }
+            else if(!enemyok && target(d, b, d->gunselect == GUN_FIST, false, SIGHTMIN))
+                enemyok = (e = getclient(d->ai->enemy)) != NULL;
+        }
+        if(enemyok)
         {
             vec ep = getaimpos(d, e);
-            bool insight = cansee(d, dp, ep), hasseen = d->ai->enemyseen && lastmillis-d->ai->enemyseen <= (d->skill*50)+1000,
-                quick = d->ai->enemyseen && lastmillis-d->ai->enemyseen <= skmod, targeted = hastarget(d, b, e), idle = b.idle == 1;
-			if(d->gunselect == GUN_FIST && targeted)
-			{
-				d->ai->spot = e->feetpos();
-				getyawpitch(dp, vec(d->ai->spot).add(vec(0, 0, d->eyeheight)), d->ai->targyaw, d->ai->targpitch);
-				idle = d->ai->dontmove = false;
-				insight = true;
-			}
+            float yaw, pitch;
+            getyawpitch(dp, ep, yaw, pitch);
+            fixrange(yaw, pitch);
+            bool insight = cansee(d, dp, ep), hasseen = d->ai->enemyseen && lastmillis-d->ai->enemyseen <= (d->skill*10)+3000,
+                quick = d->ai->enemyseen && lastmillis-d->ai->enemyseen <= (d->gunselect == GUN_CG ? 300 : skmod)+30;
             if(insight) d->ai->enemyseen = lastmillis;
-            if(idle || insight || hasseen)
+            if(idle || insight || hasseen || quick)
             {
-                float yaw, pitch;
-                getyawpitch(dp, ep, yaw, pitch);
-                fixrange(yaw, pitch);
-                float sskew = (insight ? 2.f : (hasseen ? 1.f : 0.5f))*((insight || hasseen) && (d->jumping || d->timeinair) ? 1.5f : 1.f);
-                if(idle)
+                float sskew = insight || d->skill > 100 ? 1.5f : (hasseen ? 1.f : 0.5f);
+                if(insight && lockon(d, e, 16))
                 {
                     d->ai->targyaw = yaw;
                     d->ai->targpitch = pitch;
-                    if(!insight) frame /= 3.f;
+                    if(!idle) frame *= 2;
+                    d->ai->becareful = false;
                 }
-                else if(!insight) frame /= 2.f;
                 scaleyawpitch(d->yaw, d->pitch, yaw, pitch, frame, sskew);
                 if(insight || quick)
                 {
-                    if(targeted && canshoot(d))
+                    if(canshoot(d, e) && hastarget(d, b, e, yaw, pitch, dp.squaredist(ep)))
                     {
                         d->attacking = true;
                         d->ai->lastaction = lastmillis;
-                        result = 4;
+                        result = 3;
                     }
-                    else result = insight ? 3 : 2;
+                    else result = 2;
                 }
-                else
-                {
-                    if(!b.idle && !hasseen) noenemy(d);
-                    result = hasseen ? 2 : 1;
-                }
+                else result = 1;
             }
             else
             {
-                if(!b.idle) noenemy(d);
+                if(!d->ai->enemyseen || lastmillis-d->ai->enemyseen > (d->skill*50)+3000)
+                {
+                    d->ai->enemy = -1;
+                    d->ai->enemyseen = d->ai->enemymillis = 0;
+                }
+                enemyok = false;
                 result = 0;
-                frame /= 2.f;
             }
         }
         else
         {
-            if(!b.idle) noenemy(d);
+            if(!enemyok)
+            {
+                d->ai->enemy = -1;
+                d->ai->enemyseen = d->ai->enemymillis = 0;
+            }
+            enemyok = false;
             result = 0;
-            frame /= 2.f;
         }
 
         fixrange(d->ai->targyaw, d->ai->targpitch);
-        float aimyaw = d->ai->targyaw; //float aimpitch = d->ai->targpitch;
-        if(!result) scaleyawpitch(d->yaw, d->pitch, d->ai->targyaw, d->ai->targpitch, frame, 1.f);
+        if(!result) scaleyawpitch(d->yaw, d->pitch, d->ai->targyaw, d->ai->targpitch, frame*0.25f, 1.f);
 
-        if(!d->ai->dontmove)
+        if(d->ai->becareful && d->physstate == PHYS_FALL)
+        {
+            float offyaw, offpitch;
+            vec v = vec(d->vel).normalize();
+            vectoyawpitch(v, offyaw, offpitch);
+            offyaw -= d->yaw; offpitch -= d->pitch;
+            if(fabs(offyaw)+fabs(offpitch) >= 135) d->ai->becareful = false;
+            else if(d->ai->becareful) d->ai->dontmove = true;
+        }
+        else d->ai->becareful = false;
+
+        if(d->ai->dontmove) d->move = d->strafe = 0;
+        else
         { // our guys move one way.. but turn another?! :)
             const struct aimdir { int move, strafe, offset; } aimdirs[8] =
             {
@@ -905,97 +1031,136 @@ namespace ai
                 {  0, 1, 270 },
                 {  1, 1, 315 }
             };
-            float yaw = aimyaw-d->yaw;
+            float yaw = d->ai->targyaw-d->yaw;
             while(yaw < 0.0f) yaw += 360.0f;
             while(yaw >= 360.0f) yaw -= 360.0f;
             int r = clamp(((int)floor((yaw+22.5f)/45.0f))&7, 0, 7);
             const aimdir &ad = aimdirs[r];
             d->move = ad.move;
             d->strafe = ad.strafe;
-            //aimyaw -= ad.offset;
-            //fixrange(d->aimyaw, d->aimpitch);
         }
-        else d->move = d->strafe = 0;
-        d->ai->dontmove = false;
-        d->ai->lastrun = lastmillis;
+        findorientation(dp, d->yaw, d->pitch, d->ai->target);
         return result;
     }
 
-    void chooseweapon(fpsent *d)
+    bool hasrange(fpsent *d, fpsent *e, int weap)
     {
-        static const int gunprefs[] = { GUN_CG, GUN_RL, GUN_SG, GUN_RIFLE, GUN_GL, GUN_PISTOL, GUN_FIST };
-        int gun = -1;
-        if(d->hasammo(d->ai->weappref)) gun = d->ai->weappref;
-        else
+        if(!e) return true;
+        if(targetable(d, e))
         {
-        	loopi(sizeof(gunprefs)/sizeof(gunprefs[0])) if(d->hasammo(gunprefs[i]))
-        	{
-        		gun = gunprefs[i];
-        		break;
-			}
+            vec ep = getaimpos(d, e);
+            float dist = ep.squaredist(d->headpos());
+            if(weaprange(d, weap, dist)) return true;
         }
-        if(gun >= 0 && gun != d->gunselect) gunselect(gun, d);
-    }
-
-    void pickup(fpsent *d, extentity &e)
-    {
-        if(!d->hasammo(d->gunselect) || (d->gunselect != d->ai->weappref && (!isgoodammo(d->gunselect) || d->hasammo(d->ai->weappref))))
-            chooseweapon(d);
+        return false;
     }
 
     bool request(fpsent *d, aistate &b)
     {
-        if(!d->hasammo(d->gunselect) || (d->gunselect != d->ai->weappref && (!isgoodammo(d->gunselect) || d->hasammo(d->ai->weappref))))
-            chooseweapon(d);
+        fpsent *e = getclient(d->ai->enemy);
+        if(!d->hasammo(d->gunselect) || !hasrange(d, e, d->gunselect) || (d->gunselect != d->ai->weappref && (!isgoodammo(d->gunselect) || d->hasammo(d->ai->weappref))))
+        {
+            static const int gunprefs[] = { GUN_CG, GUN_RL, GUN_SG, GUN_RIFLE, GUN_GL, GUN_PISTOL, GUN_FIST };
+            int gun = -1;
+            if(d->hasammo(d->ai->weappref) && hasrange(d, e, d->ai->weappref)) gun = d->ai->weappref;
+            else
+            {
+                loopi(sizeof(gunprefs)/sizeof(gunprefs[0])) if(d->hasammo(gunprefs[i]) && hasrange(d, e, gunprefs[i]))
+                {
+                    gun = gunprefs[i];
+                    break;
+                }
+            }
+            if(gun >= 0 && gun != d->gunselect) gunselect(gun, d);
+        }
         return process(d, b) >= 2;
     }
 
-    void findorientation(vec &o, float yaw, float pitch, vec &pos)
-    {
-        vec dir;
-        vecfromyawpitch(yaw, pitch, 1, 0, dir);
-        if(raycubepos(o, dir, pos, 0, RAY_CLIPMAT|RAY_SKIPFIRST) == -1)
-            pos = dir.mul(2*getworldsize()).add(o); //otherwise 3dgui won't work when outside of map
-    }
+	void timeouts(fpsent *d, aistate &b)
+	{
+        if(d->blocked)
+        {
+            d->ai->blocktime += lastmillis-d->ai->lastrun;
+            if(d->ai->blocktime > (d->ai->blockseq+1)*500)
+            {
+                switch(d->ai->blockseq)
+                {
+                    case 1: case 2: case 3:
+                        if(entities::ents.inrange(d->ai->targnode)) d->ai->addprevnode(d->ai->targnode);
+                        d->ai->clear(false);
+                        break;
+                    case 4: d->ai->reset(true); break;
+                    case 5: d->ai->reset(false); break;
+                    case 6: suicide(d); return; break; // this is our last resort..
+                    case 0: default: break;
+                }
+                d->ai->blockseq++;
+            }
+        }
+        else d->ai->blocktime = d->ai->blockseq = 0;
+
+        if(d->ai->targnode == d->ai->targlast)
+        {
+            d->ai->targtime += lastmillis-d->ai->lastrun;
+            if(d->ai->targtime > (d->ai->targseq+1)*1000)
+            {
+                switch(d->ai->targseq)
+                {
+                    case 1: case 2: case 3:
+                        if(entities::ents.inrange(d->ai->targnode)) d->ai->addprevnode(d->ai->targnode);
+                        d->ai->clear(false);
+                        break;
+                    case 4: d->ai->reset(true); break;
+                    case 5: d->ai->reset(false); break;
+                    case 6: suicide(d); return; break; // this is our last resort..
+                    case 0: default: break;
+                }
+                d->ai->targseq++;
+            }
+        }
+        else
+        {
+            d->ai->targtime = d->ai->targseq = 0;
+            d->ai->targlast = d->ai->targnode;
+        }
+
+        if(d->ai->lasthunt)
+        {
+            int millis = lastmillis-d->ai->lasthunt;
+            if(millis <= 3000) { d->ai->tryreset = false; d->ai->huntseq = 0; }
+            else if(millis > (d->ai->huntseq+1)*3000)
+            {
+                switch(d->ai->huntseq)
+                {
+                    case 0: d->ai->reset(true); break;
+                    case 1: d->ai->reset(false); break;
+                    case 2: suicide(d); return; break; // this is our last resort..
+                    default: break;
+                }
+                d->ai->huntseq++;
+            }
+        }
+	}
 
     void logic(fpsent *d, aistate &b, bool run)
     {
         vec dp = d->headpos();
-        findorientation(dp, d->yaw, d->pitch, d->ai->target);
         bool allowmove = canmove(d) && b.type != AI_S_WAIT;
         if(d->state != CS_ALIVE || !allowmove) d->stopmoving();
         if(d->state == CS_ALIVE)
         {
             if(allowmove)
             {
-                if(!request(d, b)) target(d, b, false, b.idle ? true : false);
+                if(!request(d, b)) target(d, b, d->gunselect == GUN_FIST, b.idle ? true : false);
                 shoot(d, d->ai->target);
-                if(d->ai->lasthunt)
-                {
-                    int millis = lastmillis-d->ai->lasthunt;
-                    if(millis < 5000) d->ai->tryreset = false;
-                    else if(millis < 10000)
-                    {
-                        if(!d->ai->tryreset) setup(d, true);
-                    }
-                    else
-                    {
-                        if(d->ai->tryreset)
-                        {
-                            suicide(d); // better off doing something than nothing
-                            d->ai->reset(false);
-                        }
-                    }
-                }
-
-                d->ai->addprevnode(d->lastnode);
             }
             if(!intermission)
             {
                 if(d->ragdoll) cleanragdoll(d);
                 moveplayer(d, 10, true);
-                entities::checkitems(d);
-                if(cmode) cmode->checkitems(d);
+                if(allowmove && !b.idle) timeouts(d, b);
+				entities::checkitems(d);
+				if(cmode) cmode->checkitems(d);
             }
         }
         else if(d->state == CS_DEAD)
@@ -1010,7 +1175,7 @@ namespace ai
         d->attacking = d->jumping = false;
     }
 
-    void avoid()
+	void avoid()
     {
         // guess as to the radius of ai and other critters relying on the avoid set for now
         float guessradius = player1->radius;
@@ -1021,7 +1186,9 @@ namespace ai
             if(d->state != CS_ALIVE) continue;
             obstacles.avoidnear(d, d->o.z + d->aboveeye + 1, d->feetpos(), guessradius + d->radius);
         }
-        avoidweapons(obstacles, guessradius);
+		extern avoidset wpavoid;
+		obstacles.add(wpavoid);
+		avoidweapons(obstacles, guessradius);
     }
 
     void think(fpsent *d, bool run)
@@ -1029,8 +1196,8 @@ namespace ai
         // the state stack works like a chain of commands, certain commands simply replace each other
         // others spawn new commands to the stack the ai reads the top command from the stack and executes
         // it or pops the stack and goes back along the history until it finds a suitable command to execute
-        if(d->ai->state.empty()) setup(d);
-        bool cleannext = false;
+        if(d->ai->state.empty()) setup(d, false);
+        bool cleannext = false, parse = run && waypoints.inrange(d->lastnode);
         loopvrev(d->ai->state)
         {
             aistate &c = d->ai->state[i];
@@ -1042,13 +1209,13 @@ namespace ai
             }
             if(d->state == CS_DEAD && d->respawned!=d->lifesequence && (!cmode || cmode->respawnwait(d) <= 0) && lastmillis - d->lastpain >= 500)
             {
-                addmsg(SV_TRYSPAWN, "rc", d);
+                addmsg(N_TRYSPAWN, "rc", d);
                 d->respawned = d->lifesequence;
             }
-            if(d->state == CS_ALIVE && run && lastmillis >= c.next)
+            else if(d->state == CS_ALIVE && parse)
             {
                 int result = 0;
-                c.idle = c.type == AI_S_WAIT ? 1 : 0;
+                c.idle = 0;
                 switch(c.type)
                 {
                     case AI_S_WAIT: result = dowait(d, c); break;
@@ -1059,28 +1226,23 @@ namespace ai
                 }
                 if(result <= 0)
                 {
-                    d->ai->route.setsize(0);
+                    d->ai->clear(true);
                     if(c.type != AI_S_WAIT)
                     {
-                        d->ai->removestate(i);
                         switch(result)
                         {
-                            case 0: default: cleannext = true; break;
+                            case 0: default: d->ai->removestate(i); cleannext = true; break;
                             case -1: i = d->ai->state.length()-1; break;
                         }
+                        continue; // shouldn't interfere
                     }
-                    else
-                    {
-                        c.next = lastmillis+1000;
-                        d->ai->dontmove = true;
-                    }
-                    continue; // shouldn't interfere
                 }
             }
-            logic(d, c, run);
+            logic(d, c, parse);
             break;
         }
-        if(d->ai->clear) d->ai->wipe();
+        if(d->ai->trywipe) d->ai->wipe();
+        d->ai->lastrun = lastmillis;
     }
 
     void drawstate(fpsent *d, aistate &b, bool top, int above)
@@ -1093,9 +1255,9 @@ namespace ai
         string s;
         if(top)
         {
-            formatstring(s)("@\f0%s (%d[%d]) %s:%d (%d[%d])",
+            formatstring(s)("\f0%s (%d) %s:%d (%d[%d])",
                 bnames[b.type],
-                lastmillis-b.millis, b.next-lastmillis,
+                lastmillis-b.millis,
                 btypes[clamp(b.targtype+1, 0, AI_T_MAX+1)], b.target,
                 !d->ai->route.empty() ? d->ai->route[0] : -1,
                 d->ai->route.length()
@@ -1103,17 +1265,17 @@ namespace ai
         }
         else
         {
-            formatstring(s)("@\f2%s (%d[%d]) %s:%d",
+            formatstring(s)("\f2%s (%d) %s:%d",
                 bnames[b.type],
-                lastmillis-b.millis, b.next-lastmillis,
+                lastmillis-b.millis,
                 btypes[clamp(b.targtype+1, 0, AI_T_MAX+1)], b.target
             );
         }
-        particle_text(vec(d->abovehead()).add(vec(0, 0, above)), s, PART_TEXT, 1);
+        particle_textcopy(vec(d->abovehead()).add(vec(0, 0, above)), s, PART_TEXT, 1);
         if(b.targtype == AI_T_ENTITY && entities::ents.inrange(b.target))
         {
-            formatstring(s)("@GOAL: %s", colorname(d));
-            particle_text(entities::ents[b.target]->o, s, PART_TEXT, 1);
+            formatstring(s)("GOAL: %s", colorname(d));
+            particle_textcopy(entities::ents[b.target]->o, s, PART_TEXT, 1);
         }
     }
 
@@ -1174,6 +1336,13 @@ namespace ai
                         if(aidebug > 2) top = false;
                         else break;
                     }
+                }
+                if(aidebug > 2)
+                {
+                    if(d->ai->weappref >= 0 && d->ai->weappref < NUMGUNS)
+                        particle_textcopy(vec(d->abovehead()).add(vec(0, 0, above += 2)), guns[d->ai->weappref].name, PART_TEXT, 1);
+                    fpsent *e = getclient(d->ai->enemy);
+                    if(e) particle_textcopy(vec(d->abovehead()).add(vec(0, 0, above += 2)), colorname(e), PART_TEXT, 1);
                 }
             }
         }

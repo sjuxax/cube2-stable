@@ -41,6 +41,24 @@ bool isconnected(bool attempt)
 
 ICOMMAND(isconnected, "i", (int *attempt), intret(isconnected(*attempt > 0) ? 1 : 0));
 
+const ENetAddress *connectedpeer()
+{
+    return curpeer ? &curpeer->address : NULL;
+}
+
+ICOMMAND(connectedip, "", (),
+{
+    const ENetAddress *address = connectedpeer();
+    string hostname;
+    result(address && enet_address_get_host_ip(address, hostname, sizeof(hostname)) >= 0 ? hostname : "");
+});
+
+ICOMMAND(connectedport, "", (),
+{
+    const ENetAddress *address = connectedpeer();
+    intret(address ? address->port : -1);
+});
+
 void abortconnect()
 {
     if(!connpeer) return;
@@ -51,6 +69,9 @@ void abortconnect()
     enet_host_destroy(clienthost);
     clienthost = NULL;
 }
+
+SVAR(connectname, "");
+VAR(connectport, 0, 0, 0xFFFF);
 
 void connectserv(const char *servername, int serverport, const char *serverpassword)
 {   
@@ -67,7 +88,9 @@ void connectserv(const char *servername, int serverport, const char *serverpassw
 
     if(servername)
     {
-        addserver(servername, serverport, serverpassword[0] ? serverpassword : NULL);
+        if(strcmp(servername, connectname)) setsvar("connectname", servername);
+        if(serverport != connectport) setvar("connectport", serverport);
+        addserver(servername, serverport, serverpassword && serverpassword[0] ? serverpassword : NULL);
         conoutf("attempting to connect to %s:%d", servername, serverport);
         if(!resolverwait(servername, &address))
         {
@@ -77,15 +100,18 @@ void connectserv(const char *servername, int serverport, const char *serverpassw
     }
     else
     {
+        setsvar("connectname", "");
+        setvar("connectport", 0);
         conoutf("attempting to connect over LAN");
         address.host = ENET_HOST_BROADCAST;
     }
 
-    if(!clienthost) clienthost = enet_host_create(NULL, 2, rate, rate);
+    if(!clienthost) 
+        clienthost = enet_host_create(NULL, 2, server::numchannels(), rate, rate);
 
     if(clienthost)
     {
-        connpeer = enet_host_connect(clienthost, &address, game::numchannels()); 
+        connpeer = enet_host_connect(clienthost, &address, server::numchannels(), 0); 
         enet_host_flush(clienthost);
         connmillis = totalmillis;
         connattempts = 0;
@@ -93,6 +119,17 @@ void connectserv(const char *servername, int serverport, const char *serverpassw
         game::connectattempt(servername ? servername : "", serverpassword ? serverpassword : "", address);
     }
     else conoutf("\f3could not connect to server");
+}
+
+void reconnect(const char *serverpassword)
+{
+    if(!connectname[0] || connectport <= 0)
+    {
+        conoutf(CON_ERROR, "no previous connection");
+        return;
+    }
+
+    connectserv(connectname, connectport, serverpassword);
 }
 
 void disconnect(bool async, bool cleanup)
@@ -140,6 +177,7 @@ void trydisconnect()
 
 ICOMMAND(connect, "sis", (char *name, int *port, char *pw), connectserv(name, *port, pw));
 ICOMMAND(lanconnect, "is", (int *port, char *pw), connectserv(NULL, *port, pw));
+COMMAND(reconnect, "s");
 COMMANDN(disconnect, trydisconnect, "");
 ICOMMAND(localconnect, "", (), { if(!isconnected() && !haslocalclients()) localconnect(); });
 ICOMMAND(localdisconnect, "", (), { if(haslocalclients()) localdisconnect(); });

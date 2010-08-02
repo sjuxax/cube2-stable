@@ -33,9 +33,79 @@ struct menu : g3d_callback
     }
 };
 
+struct delayedupdate
+{
+    enum
+    {
+        INT,
+        FLOAT,
+        STRING,
+        ACTION
+    } type;
+    ident *id;
+    union
+    {
+        int i;
+        float f;
+        char *s;
+    } val;
+    delayedupdate() : type(ACTION), id(NULL) { val.s = NULL; }
+    ~delayedupdate() { if(type == STRING || type == ACTION) DELETEA(val.s); }
+
+    void schedule(const char *s) { type = ACTION; val.s = newstring(s); }
+    void schedule(ident *var, int i) { type = INT; id = var; val.i = i; }
+    void schedule(ident *var, float f) { type = FLOAT; id = var; val.f = f; }
+    void schedule(ident *var, char *s) { type = STRING; id = var; val.s = newstring(s); }
+
+    int getint() const
+    {
+        switch(type)
+        {
+            case INT: return val.i;
+            case FLOAT: return int(val.f);
+            case STRING: return int(strtol(val.s, NULL, 0));
+            default: return 0;
+        }
+    }
+
+    float getfloat() const
+    {
+        switch(type)
+        {
+            case INT: return float(val.i);
+            case FLOAT: return val.f;
+            case STRING: return float(parsefloat(val.s));
+            default: return 0;
+        }
+    }
+   
+    const char *getstring() const
+    {
+        switch(type)
+        {
+            case INT: return intstr(val.i);
+            case FLOAT: return intstr(int(floor(val.f)));
+            case STRING: return val.s;
+            default: return "";
+        }
+    }
+
+    void run()
+    {
+        if(type == ACTION) { if(val.s) execute(val.s); }
+        else if(id) switch(id->type)
+        {
+            case ID_VAR: setvarchecked(id, getint()); break;
+            case ID_FVAR: setfvarchecked(id, getfloat()); break;
+            case ID_SVAR: setsvarchecked(id, getstring()); break;
+            case ID_ALIAS: alias(id->name, getstring()); break;
+        }
+    }
+};
+     
 static hashtable<const char *, menu> guis;
 static vector<menu *> guistack;
-static vector<char *> executelater;
+static vector<delayedupdate> updatelater;
 static bool shouldclearmenu = true, clearlater = false;
 
 VARP(menudistance,  16, 40,  256);
@@ -141,10 +211,11 @@ void guinoautotab(char *contents)
 void guibutton(char *name, char *action, char *icon)
 {
     if(!cgui) return;
-    int ret = cgui->button(name, GUI_BUTTON_COLOR, *icon ? icon : (strstr(action, "showgui") ? "menu" : "action"));
+    bool hideicon = !strcmp(icon, "0");
+    int ret = cgui->button(name, GUI_BUTTON_COLOR, hideicon ? NULL : (icon[0] ? icon : (strstr(action, "showgui") ? "menu" : "action")));
     if(ret&G3D_UP) 
     {
-        executelater.add(newstring(*action ? action : name));
+        updatelater.add().schedule(action[0] ? action : name);
         if(shouldclearmenu) clearlater = true;
     }
     else if(ret&G3D_ROLLOVER)
@@ -168,7 +239,7 @@ void guiimage(char *path, char *action, float *scale, int *overlaid, char *alt)
     {
         if(*action)
         {
-            executelater.add(newstring(action));
+            updatelater.add().schedule(action);
             if(shouldclearmenu) clearlater = true;
         }
     }
@@ -195,7 +266,8 @@ void guitextbox(char *text, int *width, int *height, int *color)
 
 void guitext(char *name, char *icon)
 {
-    if(cgui) cgui->text(name, icon[0] ? GUI_BUTTON_COLOR : GUI_TEXT_COLOR, icon[0] ? icon : "info");
+    bool hideicon = !strcmp(icon, "0");
+    if(cgui) cgui->text(name, !hideicon && icon[0] ? GUI_BUTTON_COLOR : GUI_TEXT_COLOR, hideicon ? NULL : (icon[0] ? icon : "info"));
 }
 
 void guititle(char *name)
@@ -213,26 +285,21 @@ void guibar()
     if(cgui) cgui->separator();
 }
 
-static void updateval(char *var, int val, char *onchange)
+void guistrut(float *strut, int *alt)
 {
-    ident *id = getident(var);
-    string assign;
-    if(!id) return;
-    switch(id->type)
-    {
-        case ID_VAR:
-        case ID_FVAR:
-        case ID_SVAR:
-            formatstring(assign)("%s %d", var, val);
-            break;
-        case ID_ALIAS: 
-            formatstring(assign)("%s = %d", var, val);
-            break;
-        default:
-            return;
-    }
-    executelater.add(newstring(assign));
-    if(onchange[0]) executelater.add(newstring(onchange)); 
+	if(cgui)
+	{
+		if(!*alt) cgui->pushlist();
+		cgui->strut(*strut);
+		if(!*alt) cgui->poplist();
+	}
+}
+
+template<class T> static void updateval(char *var, T val, char *onchange)
+{
+    ident *id = newident(var);
+    updatelater.add().schedule(id, val);
+    if(onchange[0]) updatelater.add().schedule(onchange);
 }
 
 static int getval(char *var)
@@ -243,9 +310,37 @@ static int getval(char *var)
     {
         case ID_VAR: return *id->storage.i;
         case ID_FVAR: return int(*id->storage.f);
-        case ID_SVAR: return atoi(*id->storage.s);
-        case ID_ALIAS: return atoi(id->action);
+        case ID_SVAR: return parseint(*id->storage.s);
+        case ID_ALIAS: return parseint(id->action);
         default: return 0;
+    }
+}
+
+static float getfval(char *var)
+{
+    ident *id = getident(var);
+    if(!id) return 0;
+    switch(id->type)
+    {
+        case ID_VAR: return *id->storage.i;
+        case ID_FVAR: return *id->storage.f;
+        case ID_SVAR: return parsefloat(*id->storage.s);
+        case ID_ALIAS: return parsefloat(id->action);
+        default: return 0;
+    }
+}
+
+static const char *getsval(char *var)
+{
+    ident *id = getident(var);
+    if(!id) return "";
+    switch(id->type)
+    {
+        case ID_VAR: return intstr(*id->storage.i);
+        case ID_FVAR: return floatstr(*id->storage.f);
+        case ID_SVAR: return *id->storage.s;
+        case ID_ALIAS: return id->action;
+        default: return "";
     }
 }
 
@@ -264,7 +359,7 @@ void guilistslider(char *var, char *list, char *onchange)
     list += strspn(list, "\n\t ");
     while(*list)
     {
-        vals.add(atoi(list));
+        vals.add(parseint(list));
         list += strcspn(list, "\n\t \0");
         list += strspn(list, "\n\t ");
     }
@@ -276,18 +371,38 @@ void guilistslider(char *var, char *list, char *onchange)
     if(offset != oldoffset) updateval(var, vals[offset], onchange);
 }
 
-void guicheckbox(char *name, char *var, int *on, int *off, char *onchange)
+void guinameslider(char *var, char *names, char *list, char *onchange)
 {
-    bool enabled = getval(var)!=*off;
+    if(!cgui) return;
+    vector<int> vals;
+    list += strspn(list, "\n\t ");
+    while(*list)
+    {
+        vals.add(parseint(list));
+        list += strcspn(list, "\n\t \0");
+        list += strspn(list, "\n\t ");
+    }
+    if(vals.empty()) return;
+    int val = getval(var), oldoffset = vals.length()-1, offset = oldoffset;
+    loopv(vals) if(val <= vals[i]) { oldoffset = offset = i; break; }
+    char *label = indexlist(names, offset);
+    cgui->slider(offset, 0, vals.length()-1, GUI_TITLE_COLOR, label);
+    if(offset != oldoffset) updateval(var, vals[offset], onchange);
+    delete[] label;
+}
+
+void guicheckbox(char *name, char *var, float *on, float *off, char *onchange)
+{
+    bool enabled = getfval(var)!=*off;
     if(cgui && cgui->button(name, GUI_BUTTON_COLOR, enabled ? "checkbox_on" : "checkbox_off")&G3D_UP)
     {
-        updateval(var, enabled ? *off : (*on || *off ? *on : 1), onchange);
+        updateval(var, enabled ? *off : (*on || *off ? *on : 1.0f), onchange);
     }
 }
 
-void guiradio(char *name, char *var, int *n, char *onchange)
+void guiradio(char *name, char *var, float *n, char *onchange)
 {
-    bool enabled = getval(var)==*n;
+    bool enabled = getfval(var)==*n;
     if(cgui && cgui->button(name, GUI_BUTTON_COLOR, enabled ? "radio_on" : "radio_off")&G3D_UP)
     {
         if(!enabled) updateval(var, *n, onchange);
@@ -308,15 +423,9 @@ void guibitfield(char *name, char *var, int *mask, char *onchange)
 void guifield(char *var, int *maxlength, char *onchange)
 {   
     if(!cgui) return;
-    const char *initval = "";
-    ident *id = getident(var);
-    if(id && id->type==ID_ALIAS) initval = id->action;
+    const char *initval = getsval(var);
 	char *result = cgui->field(var, GUI_BUTTON_COLOR, *maxlength ? *maxlength : 12, 0, initval);
-    if(result) 
-    {
-        alias(var, result);
-        if(onchange[0]) executelater.add(newstring(onchange));
-    }
+    if(result) updateval(var, result, onchange); 
 }
 
 //-ve maxlength indicates a wrapped text field of any (approx 260 chars) length, |maxlength| is the field width
@@ -331,15 +440,9 @@ void guieditor(char *name, int *maxlength, int *height, int *mode)
 void guikeyfield(char *var, int *maxlength, char *onchange)
 {
     if(!cgui) return;
-    const char *initval = "";
-    ident *id = getident(var);
-    if(id && id->type==ID_ALIAS) initval = id->action;
+    const char *initval = getsval(var);
     char *result = cgui->keyfield(var, GUI_BUTTON_COLOR, *maxlength ? *maxlength : -8, 0, initval);
-    if(result)
-    {
-        alias(var, result);
-        if(onchange[0]) execute(onchange);
-    }
+    if(result) updateval(var, result, onchange);
 }
 
 //use text<action> to do more...
@@ -349,6 +452,14 @@ void guilist(char *contents)
 {
     if(!cgui) return;
     cgui->pushlist();
+    execute(contents);
+    cgui->poplist();
+}
+
+void guialign(int *align, char *contents)
+{
+    if(!cgui) return;
+    cgui->pushlist(clamp(*align, -1, 1));
     execute(contents);
     cgui->poplist();
 }
@@ -379,7 +490,7 @@ void guiservers()
         char *command = showservers(cgui);
         if(command)
         {
-            executelater.add(command);
+            updatelater.add().schedule(command);
             if(shouldclearmenu) clearlater = true;
         }
     }
@@ -396,14 +507,17 @@ COMMAND(guistayopen, "s");
 COMMAND(guinoautotab, "s");
 
 COMMAND(guilist, "s");
+COMMAND(guialign, "is");
 COMMAND(guititle, "s");
 COMMAND(guibar,"");
+COMMAND(guistrut,"fi");
 COMMAND(guiimage,"ssfis");
 COMMAND(guislider,"siis");
 COMMAND(guilistslider, "sss");
-COMMAND(guiradio,"ssis");
+COMMAND(guinameslider, "ssss");
+COMMAND(guiradio,"ssfs");
 COMMAND(guibitfield, "ssis");
-COMMAND(guicheckbox, "ssiis");
+COMMAND(guicheckbox, "ssffs");
 COMMAND(guitab, "s");
 COMMAND(guifield, "sis");
 COMMAND(guikeyfield, "sis");
@@ -435,8 +549,8 @@ static struct applymenu : menu
         {
             int changetypes = 0;
             loopv(needsapply) changetypes |= needsapply[i].type;
-            if(changetypes&CHANGE_GFX) executelater.add(newstring("resetgl"));
-            if(changetypes&CHANGE_SOUND) executelater.add(newstring("resetsound"));
+            if(changetypes&CHANGE_GFX) updatelater.add().schedule("resetgl");
+            if(changetypes&CHANGE_SOUND) updatelater.add().schedule("resetsound");
             clearlater = true;
         }
         if(g.button("no", GUI_BUTTON_COLOR, "action")&G3D_UP)
@@ -447,7 +561,7 @@ static struct applymenu : menu
     void clear()
     {
         menu::clear();
-        needsapply.setsize(0);
+        needsapply.shrink(0);
     }
 } applymenu;
 
@@ -481,8 +595,8 @@ void menuprocess()
 {
     processingmenu = true;
     int wasmain = mainmenu, level = guistack.length();
-    loopv(executelater) execute(executelater[i]);
-    executelater.deletecontentsa();
+    loopv(updatelater) updatelater[i].run();
+    updatelater.shrink(0);
     if(wasmain > mainmenu || clearlater)
     {
         if(wasmain > mainmenu || level==guistack.length()) 

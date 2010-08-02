@@ -4,6 +4,14 @@ VAR(importcuberemip, 0, 1024, 2048);
 
 struct cubeloader
 {
+    enum
+    {
+        DEFAULT_LIQUID = 1,
+        DEFAULT_WALL,
+        DEFAULT_FLOOR,
+        DEFAULT_CEIL
+    };
+
     enum                              // block types, order matters!
     {
         C_SOLID = 0,                  // entirely solid cube [only specifies wtex]
@@ -85,6 +93,15 @@ struct cubeloader
             default:
                 e.attr3 = ce.attr3;
                 e.attr4 = ce.attr4;
+                break;
+        }
+        switch(e.type)
+        {
+            case ET_PLAYERSTART:
+            case ET_MAPMODEL:
+            case ET_GAMESPECIFIC+12: // teleport
+            case ET_GAMESPECIFIC+13: // monster
+                e.attr1 = (int(e.attr1)+180)%360;
                 break;
         }
         e.attr5 = 0;
@@ -259,12 +276,12 @@ struct cubeloader
             else
             {
                 conoutf(CON_ERROR, "map %s has malformatted header", cgzname); 
-                gzclose(f); 
+                delete f;
                 return; 
             }
         }
         else if(hdr.version>5) mod = true;
-        if(hdr.version>5 && !mod) { conoutf(CON_ERROR, "map %s requires a newer version of the Cube 1 importer", cgzname); gzclose(f); return; }
+        if(hdr.version>5 && !mod) { conoutf(CON_ERROR, "map %s requires a newer version of the Cube 1 importer", cgzname); delete f; return; }
         if(!haslocalclients()) game::forceedit("");
         emptymap(12, true, NULL);
         freeocta(worldroot);
@@ -280,7 +297,7 @@ struct cubeloader
         {
             hdr.waterlevel = -100000;
         }
-        if(mod) gzseek(f, hdr.numents*sizeof(c_persistent_entity), SEEK_CUR);
+        if(mod) f->seek(hdr.numents*sizeof(c_persistent_entity), SEEK_CUR);
         else loopi(hdr.numents)
         {
             c_persistent_entity e;

@@ -255,7 +255,7 @@ COMMAND(mapsound, "sii");
 void resetchannels()
 {
     loopv(channels) if(channels[i].inuse) freechannel(i);
-    channels.setsize(0);
+    channels.shrink(0);
 }
 
 void clear_sound()
@@ -265,8 +265,8 @@ void clear_sound()
     stopmusic();
     Mix_CloseAudio();
     resetchannels();
-    gamesounds.setsizenodelete(0);
-    mapsounds.setsizenodelete(0);
+    gamesounds.setsize(0);
+    mapsounds.setsize(0);
     samples.clear();
 }
 
@@ -277,7 +277,7 @@ void clearmapsounds()
         Mix_HaltChannel(i);
         freechannel(i);
     }
-    mapsounds.setsizenodelete(0);
+    mapsounds.setsize(0);
 }
 
 void stopmapsound(extentity *e)
@@ -319,7 +319,7 @@ bool updatechannel(soundchannel &chan)
     if(chan.hasloc())
     {
         vec v;
-        float dist = camera1->o.dist(chan.loc, v);
+        float dist = chan.loc.dist(camera1->o, v);
         int rad = maxsoundradius;
         if(chan.ent)
         {
@@ -334,8 +334,8 @@ bool updatechannel(soundchannel &chan)
         if(rad > 0) vol -= int(clamp(dist/rad, 0.0f, 1.0f)*soundvol); // simple mono distance attenuation
         if(stereo && (v.x != 0 || v.y != 0) && dist>0)
         {
-            float yaw = -atan2f(v.x, v.y) - camera1->yaw*RAD; // relative angle of sound along X-Y axis
-            pan = int(255.9f*(0.5f*sinf(yaw)+0.5f)); // range is from 0 (left) to 255 (right)
+            v.rotate_around_z(-camera1->yaw*RAD);
+            pan = int(255.9f*(0.5f - 0.5f*v.x/v.magnitude2())); // range is from 0 (left) to 255 (right)
         }
     }
     vol = (vol*MAXVOL*chan.slot->volume)/255/255;
@@ -397,7 +397,7 @@ static Mix_Chunk *loadwav(const char *name)
     return c;
 }
 
-int playsound(int n, const vec *loc, extentity *ent, int loops, int fade, int chanid, int radius)
+int playsound(int n, const vec *loc, extentity *ent, int loops, int fade, int chanid, int radius, int expire)
 {
     if(nosound || !soundvol) return -1;
 
@@ -484,9 +484,9 @@ int playsound(int n, const vec *loc, extentity *ent, int loops, int fade, int ch
     if(fade) 
     {
         Mix_Volume(chanid, chan.volume);
-        playing = Mix_FadeInChannel(chanid, slot.sample->chunk, loops, fade);
+        playing = expire >= 0 ? Mix_FadeInChannelTimed(chanid, slot.sample->chunk, loops, fade, expire) : Mix_FadeInChannel(chanid, slot.sample->chunk, loops, fade);
     }
-    else playing = Mix_PlayChannel(chanid, slot.sample->chunk, loops);
+    else playing = expire >= 0 ? Mix_PlayChannelTimed(chanid, slot.sample->chunk, loops, expire) : Mix_PlayChannel(chanid, slot.sample->chunk, loops);
     if(playing >= 0) syncchannel(chan); 
     else freechannel(chanid);
     SDL_UnlockAudio();
@@ -514,12 +514,12 @@ bool stopsound(int n, int chanid, int fade)
     return true;
 }
 
-int playsoundname(const char *s, const vec *loc, int vol, int loops, int fade, int chanid, int radius) 
+int playsoundname(const char *s, const vec *loc, int vol, int loops, int fade, int chanid, int radius, int expire) 
 { 
     if(!vol) vol = 100;
     int id = findsound(s, vol, gamesounds);
     if(id < 0) id = addsound(s, vol, 0, gamesounds);
-    return playsound(id, loc, NULL, loops, fade, chanid, radius);
+    return playsound(id, loc, NULL, loops, fade, chanid, radius, expire);
 }
 
 void sound(int *n) { playsound(*n); }
@@ -552,8 +552,8 @@ void resetsound()
         DELETEA(musicfile);
         DELETEA(musicdonecmd);
         music = NULL;
-        gamesounds.setsizenodelete(0);
-        mapsounds.setsizenodelete(0);
+        gamesounds.setsize(0);
+        mapsounds.setsize(0);
         samples.clear();
         return;
     }
@@ -655,9 +655,9 @@ void closemumble()
 
 static inline vec mumblevec(const vec &v, bool pos = false)
 {
-    // change from Z up, -Y forward to Y up, +Z forward
+    // change from X left, Z up, Y forward to X right, Y up, Z forward
     // 8 cube units = 1 meter
-    vec m(v.x, v.z, -v.y);
+    vec m(-v.x, v.z, v.y);
     if(pos) m.div(8);
     return m;
 }

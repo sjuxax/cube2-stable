@@ -18,6 +18,13 @@ namespace entities
         return itemstats[t-I_SHELLS].name;
     }
 
+    int itemicon(int i)
+    {
+        int t = ents[i]->type;
+        if(t<I_SHELLS || t>I_QUAD) return -1;
+        return itemstats[t-I_SHELLS].icon;
+    }
+
     const char *entmdlname(int type)
     {
         static const char *entmdlnames[] =
@@ -96,21 +103,6 @@ namespace entities
         }
     }
 
-    void rumble(const extentity &e)
-    {
-        playsound(S_RUMBLE, &e.o);
-    }
-
-    void trigger(extentity &e)
-    {
-        switch(e.attr3)
-        {
-            case 29:
-                endsp(false);
-                break;
-        }
-    }
-
     void addammo(int type, int &v, bool local)
     {
         itemstat &is = itemstats[type-I_SHELLS];
@@ -135,25 +127,65 @@ namespace entities
         ents[n]->spawned = false;
         if(!d) return;
         itemstat &is = itemstats[type-I_SHELLS];
-        if(d!=player1 || isthirdperson()) particle_text(d->abovehead(), is.name, PART_TEXT, 2000, 0xFFC864, 4.0f, -8);
-        playsound(itemstats[type-I_SHELLS].sound, d!=player1 ? &d->o : NULL);
+        if(d!=player1 || isthirdperson())
+        {
+            //particle_text(d->abovehead(), is.name, PART_TEXT, 2000, 0xFFC864, 4.0f, -8);
+            particle_icon(d->abovehead(), is.icon%4, is.icon/4, PART_HUD_ICON_GREY, 2000, 0xFFFFFF, 2.0f, -8);
+        }
+        playsound(itemstats[type-I_SHELLS].sound, d!=player1 ? &d->o : NULL, NULL, 0, 0, -1, 0, 1500);
         d->pickup(type);
         if(d==player1) switch(type)
         {
             case I_BOOST:
                 conoutf(CON_GAMEINFO, "\f2you have a permanent +10 health bonus! (%d)", d->maxhealth);
-                playsound(S_V_BOOST);
+                playsound(S_V_BOOST, NULL, NULL, 0, 0, -1, 0, 3000);
                 break;
 
             case I_QUAD:
                 conoutf(CON_GAMEINFO, "\f2you got the quad!");
-                playsound(S_V_QUAD);
+                playsound(S_V_QUAD, NULL, NULL, 0, 0, -1, 0, 3000);
                 break;
         }
-        else if(d->ai) ai::pickup(d, *ents[n]);
     }
 
     // these functions are called when the client touches the item
+
+    void teleporteffects(fpsent *d, int tp, int td, bool local)
+    {
+        if(d == player1) playsound(S_TELEPORT);
+        else
+        {
+            if(ents.inrange(tp)) playsound(S_TELEPORT, &ents[tp]->o);
+            if(ents.inrange(td)) playsound(S_TELEPORT, &ents[td]->o);
+        }
+        if(local && d->clientnum >= 0)
+        {
+            sendposition(d);
+            packetbuf p(32, ENET_PACKET_FLAG_RELIABLE);
+            putint(p, N_TELEPORT);
+            putint(p, d->clientnum);
+            putint(p, tp);
+            putint(p, td);
+            sendclientpacket(p.finalize(), 0);
+            flushclient();
+        }
+    }
+
+    void jumppadeffects(fpsent *d, int jp, bool local)
+    {
+        if(d == player1) playsound(S_JUMPPAD);
+        else if(ents.inrange(jp)) playsound(S_JUMPPAD, &ents[jp]->o);
+        if(local && d->clientnum >= 0)
+        {
+            sendposition(d);
+            packetbuf p(16, ENET_PACKET_FLAG_RELIABLE);
+            putint(p, N_JUMPPAD);
+            putint(p, d->clientnum);
+            putint(p, jp);
+            sendclientpacket(p.finalize(), 0);
+            flushclient();
+        }
+    }
 
     void teleport(int n, fpsent *d)     // also used by monsters
     {
@@ -165,14 +197,21 @@ namespace entities
             if(beenhere<0) beenhere = e;
             if(ents[e]->attr2==tag)
             {
+                teleporteffects(d, n, e, true);
                 d->o = ents[e]->o;
                 d->yaw = ents[e]->attr1;
-                d->pitch = 0;
-                d->vel = vec(0, 0, 0);//vec(cosf(RAD*(d->yaw-90)), sinf(RAD*(d->yaw-90)), 0);
+                if(ents[e]->attr3 > 0)
+                {
+                    vec dir;
+                    vecfromyawpitch(d->yaw, 0, 1, 0, dir);
+                    float speed = d->vel.magnitude2();
+                    d->vel.x = dir.x*speed;
+                    d->vel.y = dir.y*speed;
+                }
+                else d->vel = vec(0, 0, 0);
                 entinmap(d);
                 updatedynentcache(d);
                 ai::inferwaypoints(d, ents[n]->o, ents[e]->o, 16.f);
-                msgsound(S_TELEPORT, d);
                 break;
             }
         }
@@ -185,7 +224,7 @@ namespace entities
             default:
                 if(d->canpickup(ents[n]->type))
                 {
-                    addmsg(SV_ITEMPICKUP, "rci", d, n);
+                    addmsg(N_ITEMPICKUP, "rci", d, n);
                     ents[n]->spawned = false; // even if someone else gets it first
                 }
                 break;
@@ -193,6 +232,11 @@ namespace entities
             case TELEPORT:
             {
                 if(d->lastpickup==ents[n]->type && lastmillis-d->lastpickupmillis<500) break;
+                if(ents[n]->attr3 > 0)
+                {
+                    defformatstring(hookname)("can_teleport_%d", ents[n]->attr3);
+                    if(identexists(hookname) && !execute(hookname)) break;
+                }
                 d->lastpickup = ents[n]->type;
                 d->lastpickupmillis = lastmillis;
                 teleport(n, d);
@@ -212,13 +256,13 @@ namespace entities
                 if(d->lastpickup==ents[n]->type && lastmillis-d->lastpickupmillis<300) break;
                 d->lastpickup = ents[n]->type;
                 d->lastpickupmillis = lastmillis;
+                jumppadeffects(d, n, true);
                 vec v((int)(char)ents[n]->attr3*10.0f, (int)(char)ents[n]->attr2*10.0f, ents[n]->attr1*12.5f);
-                d->timeinair = 0;
-                d->falling = vec(0, 0, 0);
+                if(d->ai) d->ai->becareful = true;
+				d->falling = vec(0, 0, 0);
+				d->physstate = PHYS_FALL;
+                d->timeinair = 1;
                 d->vel = v;
-//                d->vel.z = 0;
-//                d->vel.add(v);
-                msgsound(S_JUMPPAD, d);
                 break;
             }
         }
@@ -250,7 +294,7 @@ namespace entities
 
     void putitems(packetbuf &p)            // puts items in network stream and also spawns them locally
     {
-        putint(p, SV_ITEMLIST);
+        putint(p, N_ITEMLIST);
         loopv(ents) if(ents[i]->type>=I_SHELLS && ents[i]->type<=I_QUAD && (!m_noammo || ents[i]->type<I_SHELLS || ents[i]->type>I_CARTRIDGES))
         {
             putint(p, i);
@@ -261,12 +305,12 @@ namespace entities
 
     void resetspawns() { loopv(ents) ents[i]->spawned = false; }
 
-    void spawnitems()
+    void spawnitems(bool force)
     {
         if(m_noitems) return;
         loopv(ents) if(ents[i]->type>=I_SHELLS && ents[i]->type<=I_QUAD && (!m_noammo || ents[i]->type<I_SHELLS || ents[i]->type>I_CARTRIDGES))
         {
-            ents[i]->spawned = m_sp || (ents[i]->type!=I_QUAD && ents[i]->type!=I_BOOST);
+            ents[i]->spawned = force || m_sp || !server::delayspawn(ents[i]->type);
         }
     }
 
@@ -280,6 +324,211 @@ namespace entities
         while(ents.length()) deleteentity(ents.pop());
     }
 
+    enum
+    {
+        TRIG_COLLIDE    = 1<<0,
+        TRIG_TOGGLE     = 1<<1,
+        TRIG_ONCE       = 0<<2,
+        TRIG_MANY       = 1<<2,
+        TRIG_DISAPPEAR  = 1<<3,
+        TRIG_AUTO_RESET = 1<<4,
+        TRIG_RUMBLE     = 1<<5,
+        TRIG_LOCKED     = 1<<6,
+        TRIG_ENDSP      = 1<<7
+    };
+
+    static const int NUMTRIGGERTYPES = 32;
+
+    static const int triggertypes[NUMTRIGGERTYPES] =
+    {
+        0,
+        TRIG_ONCE,                    // 1
+        TRIG_RUMBLE,                  // 2
+        TRIG_TOGGLE,                  // 3
+        TRIG_TOGGLE | TRIG_RUMBLE,    // 4
+        TRIG_MANY,                    // 5
+        TRIG_MANY | TRIG_RUMBLE,      // 6
+        TRIG_MANY | TRIG_TOGGLE,      // 7
+        TRIG_MANY | TRIG_TOGGLE | TRIG_RUMBLE,    // 8
+        TRIG_COLLIDE | TRIG_TOGGLE | TRIG_RUMBLE, // 9
+        TRIG_COLLIDE | TRIG_TOGGLE | TRIG_AUTO_RESET | TRIG_RUMBLE, // 10
+        TRIG_COLLIDE | TRIG_TOGGLE | TRIG_LOCKED | TRIG_RUMBLE,     // 11
+        TRIG_DISAPPEAR,               // 12
+        TRIG_DISAPPEAR | TRIG_RUMBLE, // 13
+        TRIG_DISAPPEAR | TRIG_COLLIDE | TRIG_LOCKED, // 14
+        0 /* reserved 15 */,
+        0 /* reserved 16 */,
+        0 /* reserved 17 */,
+        0 /* reserved 18 */,
+        0 /* reserved 19 */,
+        0 /* reserved 20 */,
+        0 /* reserved 21 */,
+        0 /* reserved 22 */,
+        0 /* reserved 23 */,
+        0 /* reserved 24 */,
+        0 /* reserved 25 */,
+        0 /* reserved 26 */,
+        0 /* reserved 27 */,
+        0 /* reserved 28 */,
+        TRIG_DISAPPEAR | TRIG_RUMBLE | TRIG_ENDSP, // 29
+        0 /* reserved 30 */,
+        0 /* reserved 31 */,
+    };
+
+    #define validtrigger(type) (triggertypes[(type) & (NUMTRIGGERTYPES-1)]!=0)
+    #define checktriggertype(type, flag) (triggertypes[(type) & (NUMTRIGGERTYPES-1)] & (flag))
+
+    static inline void setuptriggerflags(fpsentity &e)
+    {
+        e.flags = extentity::F_ANIM;
+        if(checktriggertype(e.attr3, TRIG_COLLIDE|TRIG_DISAPPEAR)) e.flags |= extentity::F_NOSHADOW;
+        if(!checktriggertype(e.attr3, TRIG_COLLIDE)) e.flags |= extentity::F_NOCOLLIDE;
+        switch(e.triggerstate)
+        {
+            case TRIGGERING:
+                if(checktriggertype(e.attr3, TRIG_COLLIDE) && lastmillis-e.lasttrigger >= 500) e.flags |= extentity::F_NOCOLLIDE;
+                break;
+            case TRIGGERED:
+                if(checktriggertype(e.attr3, TRIG_COLLIDE)) e.flags |= extentity::F_NOCOLLIDE;
+                break;
+            case TRIGGER_DISAPPEARED:
+                e.flags |= extentity::F_NOVIS | extentity::F_NOCOLLIDE;
+                break;
+        }
+    }
+
+    void resettriggers()
+    {
+        loopv(ents)
+        {
+            fpsentity &e = *(fpsentity *)ents[i];
+            if(e.type != ET_MAPMODEL || !validtrigger(e.attr3)) continue;
+            e.triggerstate = TRIGGER_RESET;
+            e.lasttrigger = 0;
+            setuptriggerflags(e);
+        }
+    }
+
+    void unlocktriggers(int tag, int oldstate = TRIGGER_RESET, int newstate = TRIGGERING)
+    {
+        loopv(ents)
+        {
+            fpsentity &e = *(fpsentity *)ents[i];
+            if(e.type != ET_MAPMODEL || !validtrigger(e.attr3)) continue;
+            if(e.attr4 == tag && e.triggerstate == oldstate && checktriggertype(e.attr3, TRIG_LOCKED))
+            {
+                if(newstate == TRIGGER_RESETTING && checktriggertype(e.attr3, TRIG_COLLIDE) && overlapsdynent(e.o, 20)) continue;
+                e.triggerstate = newstate;
+                e.lasttrigger = lastmillis;
+                if(checktriggertype(e.attr3, TRIG_RUMBLE)) playsound(S_RUMBLE, &e.o);
+            }
+        }
+    }
+
+    ICOMMAND(trigger, "ii", (int *tag, int *state),
+    {
+        if(*state) unlocktriggers(*tag);
+        else unlocktriggers(*tag, TRIGGERED, TRIGGER_RESETTING);
+    });
+
+    VAR(triggerstate, -1, 0, 1);
+
+    void doleveltrigger(int trigger, int state)
+    {
+        defformatstring(aliasname)("level_trigger_%d", trigger);
+        if(identexists(aliasname))
+        {
+            triggerstate = state;
+            execute(aliasname);
+        }
+    }
+
+    void checktriggers()
+    {
+        if(player1->state != CS_ALIVE) return;
+        vec o = player1->feetpos();
+        loopv(ents)
+        {
+            fpsentity &e = *(fpsentity *)ents[i];
+            if(e.type != ET_MAPMODEL || !validtrigger(e.attr3)) continue;
+            switch(e.triggerstate)
+            {
+                case TRIGGERING:
+                case TRIGGER_RESETTING:
+                    if(lastmillis-e.lasttrigger>=1000)
+                    {
+                        if(e.attr4)
+                        {
+                            if(e.triggerstate == TRIGGERING) unlocktriggers(e.attr4);
+                            else unlocktriggers(e.attr4, TRIGGERED, TRIGGER_RESETTING);
+                        }
+                        if(checktriggertype(e.attr3, TRIG_DISAPPEAR)) e.triggerstate = TRIGGER_DISAPPEARED;
+                        else if(e.triggerstate==TRIGGERING && checktriggertype(e.attr3, TRIG_TOGGLE)) e.triggerstate = TRIGGERED;
+                        else e.triggerstate = TRIGGER_RESET;
+                    }
+                    setuptriggerflags(e);
+                    break;
+                case TRIGGER_RESET:
+                    if(e.lasttrigger)
+                    {
+                        if(checktriggertype(e.attr3, TRIG_AUTO_RESET|TRIG_MANY|TRIG_LOCKED) && e.o.dist(o)-player1->radius>=(checktriggertype(e.attr3, TRIG_COLLIDE) ? 20 : 12))
+                            e.lasttrigger = 0;
+                        break;
+                    }
+                    else if(e.o.dist(o)-player1->radius>=(checktriggertype(e.attr3, TRIG_COLLIDE) ? 20 : 12)) break;
+                    else if(checktriggertype(e.attr3, TRIG_LOCKED))
+                    {
+                        if(!e.attr4) break;
+                        doleveltrigger(e.attr4, -1);
+                        e.lasttrigger = lastmillis;
+                        break;
+                    }
+                    e.triggerstate = TRIGGERING;
+                    e.lasttrigger = lastmillis;
+                    setuptriggerflags(e);
+                    if(checktriggertype(e.attr3, TRIG_RUMBLE)) playsound(S_RUMBLE, &e.o);
+                    if(checktriggertype(e.attr3, TRIG_ENDSP)) endsp(false);
+                    if(e.attr4) doleveltrigger(e.attr4, 1);
+                    break;
+                case TRIGGERED:
+                    if(e.o.dist(o)-player1->radius<(checktriggertype(e.attr3, TRIG_COLLIDE) ? 20 : 12))
+                    {
+                        if(e.lasttrigger) break;
+                    }
+                    else if(checktriggertype(e.attr3, TRIG_AUTO_RESET))
+                    {
+                        if(lastmillis-e.lasttrigger<6000) break;
+                    }
+                    else if(checktriggertype(e.attr3, TRIG_MANY))
+                    {
+                        e.lasttrigger = 0;
+                        break;
+                    }
+                    else break;
+                    if(checktriggertype(e.attr3, TRIG_COLLIDE) && overlapsdynent(e.o, 20)) break;
+                    e.triggerstate = TRIGGER_RESETTING;
+                    e.lasttrigger = lastmillis;
+                    setuptriggerflags(e);
+                    if(checktriggertype(e.attr3, TRIG_RUMBLE)) playsound(S_RUMBLE, &e.o);
+                    if(checktriggertype(e.attr3, TRIG_ENDSP)) endsp(false);
+                    if(e.attr4) doleveltrigger(e.attr4, 0);
+                    break;
+            }
+        }
+    }
+
+    void animatemapmodel(const extentity &e, int &anim, int &basetime)
+    {
+        const fpsentity &f = (const fpsentity &)e;
+        if(validtrigger(f.attr3)) switch(f.triggerstate)
+        {
+            case TRIGGER_RESET: anim = ANIM_TRIGGER|ANIM_START; break;
+            case TRIGGERING: anim = ANIM_TRIGGER; basetime = f.lasttrigger; break;
+            case TRIGGERED: anim = ANIM_TRIGGER|ANIM_END; break;
+            case TRIGGER_RESETTING: anim = ANIM_TRIGGER|ANIM_REVERSE; basetime = f.lasttrigger; break;
+        }
+    }
+
     void fixentity(extentity &e)
     {
         switch(e.type)
@@ -291,9 +540,9 @@ namespace entities
             case ELEVATOR:
                 e.attr5 = e.attr4;
                 e.attr4 = e.attr3;
+            case TELEDEST:
                 e.attr3 = e.attr2;
             case MONSTER:
-            case TELEDEST:
                 e.attr2 = e.attr1;
             case RESPAWNPOINT:
                 e.attr1 = (int)player1->yaw;
@@ -320,7 +569,6 @@ namespace entities
             case FLAG:
             case MONSTER:
             case TELEDEST:
-            case MAPMODEL:
             case RESPAWNPOINT:
             case BOX:
             case BARREL:
@@ -332,6 +580,9 @@ namespace entities
                 renderentarrow(e, dir, 4);
                 break;
             }
+            case MAPMODEL:
+                if(validtrigger(e.attr3)) renderentring(e, checktriggertype(e.attr3, TRIG_COLLIDE) ? 20 : 12);
+                break;
         }
     }
 
@@ -368,20 +619,33 @@ namespace entities
     void readent(entity &e, char *buf)     // read from disk, and init
     {
         int ver = getmapversion();
-        if(ver <= 10)
+        if(ver <= 30) switch(e.type)
         {
-            if(e.type >= 7) e.type++;
-        }
-        if(ver <= 12)
-        {
-            if(e.type >= 8) e.type++;
+            case FLAG:
+            case MONSTER:
+            case TELEDEST:
+            case RESPAWNPOINT:
+            case BOX:
+            case BARREL:
+            case PLATFORM:
+            case ELEVATOR:
+                e.attr1 = (int(e.attr1)+180)%360;
+                break;
         }
     }
 
-    void editent(int i)
+    void editent(int i, bool local)
     {
         extentity &e = *ents[i];
-        addmsg(SV_EDITENT, "rii3ii5", i, (int)(e.o.x*DMF), (int)(e.o.y*DMF), (int)(e.o.z*DMF), e.type, e.attr1, e.attr2, e.attr3, e.attr4, e.attr5);
+        if(e.type == ET_MAPMODEL && validtrigger(e.attr3))
+        {
+            fpsentity &f = (fpsentity &)e;
+            f.triggerstate = TRIGGER_RESET;
+            f.lasttrigger = 0;
+            setuptriggerflags(f);
+        }
+        else e.flags = 0;
+        if(local) addmsg(N_EDITENT, "rii3ii5", i, (int)(e.o.x*DMF), (int)(e.o.y*DMF), (int)(e.o.z*DMF), e.type, e.attr1, e.attr2, e.attr3, e.attr4, e.attr5);
     }
 
     float dropheight(entity &e)
