@@ -352,6 +352,10 @@ namespace game
         g.poplist();
         g.pushlist();
         g.textf("k/d: %.2f", 0xFFFFDD, NULL, player1->kd_ratio);
+        if(m_ctf)
+        {
+            g.textf("flags captured: %d", 0xFFFFDD, NULL, player1->flags);
+        }
         g.poplist();
     }
 
